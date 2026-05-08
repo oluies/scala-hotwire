@@ -1,0 +1,27 @@
+@(csrfToken: String, room: String, wsUrl: String)
+@views.html.layout("Replay chat: " + room, csrfToken) {
+  <header>
+    <h1>JetStream replay chat — @room</h1>
+    <p class="hint">
+      Open in two tabs. Disable network on one tab, post messages from the other,
+      then re-enable: the offline tab backfills via JetStream. The page intentionally
+      renders empty on first load — every message you see arrives via the WebSocket,
+      so the broker is the single source of truth for what each tab has seen.
+    </p>
+  </header>
+
+  <replaying-turbo-stream-source
+    data-src="@wsUrl"
+    data-room="@room"></replaying-turbo-stream-source>
+
+  <div id="messages" class="messages"></div>
+
+  <form action="/jetstream-chat/@room/messages" method="post" class="compose">
+    <input type="hidden" name="_csrf" value="@csrfToken">
+    <input type="text" name="author" placeholder="Your name" required maxlength="40" autocomplete="off">
+    <input type="text" name="body" placeholder="Say something…" required maxlength="500" autocomplete="off" autofocus>
+    <button type="submit">Send</button>
+  </form>
+
+  <script type="module" src="/public/jetstream/replay.js"></script>
+}

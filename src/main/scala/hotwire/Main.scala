@@ -1,6 +1,7 @@
 package hotwire
 
 import com.typesafe.config.ConfigFactory
+import hotwire.examples.jetstream.{JetStreamBroadcastBus, ReplayChatRoutes, ReplayableBroadcastBus}
 import org.apache.pekko.actor.typed.ActorSystem
 import org.apache.pekko.actor.typed.scaladsl.Behaviors
 import org.apache.pekko.http.scaladsl.Http
@@ -28,11 +29,13 @@ object Main:
         sys.error(s"Unknown DEMO=$other (expected one of: all, chat, posts)")
 
   def main(args: Array[String]): Unit =
-    val cfg = ConfigFactory.load().getConfig("hotwire")
-    val host = cfg.getString("host")
-    val port = cfg.getInt("port")
+    val cfg     = ConfigFactory.load().getConfig("hotwire")
+    val host    = cfg.getString("host")
+    val port    = cfg.getInt("port")
     val natsUrl = Try(cfg.getString("nats-url")).toOption.filter(_.nonEmpty)
     val demo    = Demo.parse(Try(cfg.getString("demo")).getOrElse("all"))
+    val jsStreamName =
+      Try(cfg.getString("nats-js-stream")).toOption.filter(_.nonEmpty)
 
     given system: ActorSystem[Nothing] =
       ActorSystem(Behaviors.empty, "hotwire")
@@ -51,15 +54,32 @@ object Main:
             log.info("Using in-process broadcast bus (set NATS_URL to use NATS)")
             Some(new InProcessBroadcastBus())
 
-    val chatRoutes:  Option[Route] = busOpt.map(b => new ChatRoutes(b).routes)
-    val postsRoutes: Option[Route] = Option.when(demo != Demo.Chat)(new PostsRoutes().routes)
+    // Optional JetStream replay example. Activated when chat is mounted *and* both
+    // NATS_URL and NATS_JS_STREAM are set; routes mount under /jetstream-chat/<room>
+    // alongside the core chat.
+    val replayBus: Option[ReplayableBroadcastBus] =
+      (demo, natsUrl, jsStreamName) match
+        case (Demo.Posts, _, _)              => None
+        case (_, Some(url), Some(name)) =>
+          log.info(s"Connecting JetStream replay bus at $url (stream=$name)")
+          Some(
+            new JetStreamBroadcastBus(
+              JetStreamBroadcastBus.connectAndEnsureStream(url, streamName = name, subjectsWildcard = "jschat.>"),
+              streamName = name
+            )
+          )
+        case _ => None
+
+    val chatRoutes:   Option[Route] = busOpt.map(b => new ChatRoutes(b).routes)
+    val replayRoutes: Option[Route] = replayBus.map(b => new ReplayChatRoutes(b).routes)
+    val postsRoutes:  Option[Route] = Option.when(demo != Demo.Chat)(new PostsRoutes().routes)
 
     val landing = demo match
       case Demo.Posts => "/posts"
       case _          => "/chat/lobby"
 
     val mounted: Seq[Route] =
-      chatRoutes.toSeq ++ postsRoutes.toSeq ++ Seq(
+      chatRoutes.toSeq ++ replayRoutes.toSeq ++ postsRoutes.toSeq ++ Seq(
         pathPrefix("public") { getFromResourceDirectory("public") },
         pathSingleSlash { redirect(landing, StatusCodes.TemporaryRedirect) }
       )
@@ -69,12 +89,14 @@ object Main:
 
     Http().newServerAt(host, port).bind(routes).onComplete {
       case Success(binding) =>
-        log.info(s"Listening on http://$host:$port  →  open $landing")
+        val replayHint = if replayBus.isDefined then "  →  /jetstream-chat/lobby for replay demo" else ""
+        log.info(s"Listening on http://$host:$port  →  open $landing$replayHint")
         sys.addShutdownHook {
           log.info("Shutting down…")
           val done = for
             _ <- binding.terminate(5.seconds)
             _ <- busOpt.map(_.shutdown()).getOrElse(Future.successful(()))
+            _ <- replayBus.map(_.shutdown()).getOrElse(Future.successful(()))
           yield
             system.terminate()
           scala.concurrent.Await.result(done, 10.seconds)
