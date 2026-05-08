@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Hotwire (Turbo) docs
+    url: https://turbo.hotwired.dev/handbook/introduction
+    about: Wire-protocol questions about Turbo itself belong upstream.
+  - name: Apache Pekko
+    url: https://pekko.apache.org/
+    about: Pekko HTTP / Streams runtime questions are best asked upstream.

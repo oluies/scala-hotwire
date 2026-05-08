@@ -1,0 +1,54 @@
+name: Feature request
+description: Propose a change to the scaffold's API, behaviour, or scope.
+title: "[feat] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This project is a scaffold, not a framework. Proposals that **shrink**
+        the surface area or **clarify** an existing pattern land easier than
+        new abstractions.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: Concrete use case first; "would be nice if …" tends to stall.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: |
+        Sketch the API change, new file, or behaviour. Pseudocode is fine.
+      render: scala
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: |
+        What did you try or rule out? "I considered X but it doesn't work
+        because Y" is the most useful framing.
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Which area?
+      multiple: true
+      options:
+        - BroadcastBus / pub-sub façade
+        - InProcessBroadcastBus
+        - NatsBroadcastBus
+        - TurboStream marshaller / helpers
+        - CSRF / sessions
+        - Twirl / templating
+        - Example app (ChatRoutes)
+        - Build / CI / docs
+    validations:
+      required: true

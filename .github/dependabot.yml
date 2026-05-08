@@ -1,0 +1,31 @@
+# Dependabot config.
+#
+# IMPORTANT: Dependabot does NOT support sbt. The Java ecosystems it understands
+# are `maven` and `gradle`. For Scala/sbt dependency updates use Scala Steward
+# (https://github.com/scala-steward-org/scala-steward) — either by self-hosting
+# the GitHub Action or by listing this repo in `repos.md` of the public hosted
+# Scala Steward bot. Both options open PRs against this repo with the same
+# review flow as Dependabot's PRs.
+#
+# What Dependabot watches here: the GitHub Actions workflow versions
+# (actions/checkout, actions/setup-java, actions/cache, sbt/setup-sbt).
+
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "07:00"
+      timezone: "Europe/Stockholm"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "github-actions"
+    commit-message:
+      prefix: "ci"
+    groups:
+      # Bundle related action bumps into a single PR — less PR noise, one CI run.
+      actions:
+        patterns: ["*"]

@@ -1,0 +1,81 @@
+name: Bug report
+description: Something is broken or behaves differently from what the README/spec says.
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a report. The more concrete the
+        repro, the faster this gets fixed.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, what did you see instead?
+      placeholder: |
+        I expected `bus.publish("topic", "<turbo-stream …>")` to … but instead it …
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction
+      description: |
+        A small Scala snippet, request/response pair, or test case that fails.
+        Code blocks render with triple backticks.
+      render: scala
+    validations:
+      required: true
+
+  - type: dropdown
+    id: bus
+    attributes:
+      label: Which BroadcastBus implementation?
+      options:
+        - InProcessBroadcastBus
+        - NatsBroadcastBus
+        - Both / not sure
+        - Not bus-related
+    validations:
+      required: true
+
+  - type: input
+    id: scala-version
+    attributes:
+      label: Scala version
+      placeholder: "3.3.4"
+    validations:
+      required: true
+
+  - type: input
+    id: jdk-version
+    attributes:
+      label: JDK version
+      description: Output of `java --version`.
+      placeholder: "openjdk 21.0.5"
+    validations:
+      required: true
+
+  - type: input
+    id: pekko-versions
+    attributes:
+      label: Pekko HTTP / Pekko versions
+      description: Only if you've changed them in build.sbt.
+      placeholder: "pekko-http 1.1.0 / pekko 1.1.3"
+
+  - type: input
+    id: nats-version
+    attributes:
+      label: NATS server version
+      description: Only if the bug involves NatsBroadcastBus.
+      placeholder: "2.10.x"
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Server log around the failure, or a stacktrace.
+      render: shell
