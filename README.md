@@ -163,7 +163,7 @@ socket and pipes every text frame straight into Turbo's stream observer.
 
 ## Why Pekko, not Akka
 
-Akka 2.7+ is BSL with a US$25M-revenue commercial trigger. Pekko is the Apache 2.0
+Akka 2.7+ is BSL, Pekko is the Apache 2.0
 fork of Akka 2.6.x, actively maintained, with API parity at the package level
 (`akka.…` → `org.apache.pekko.…`). Pick Pekko unless you have a paid Akka
 subscription.
