@@ -7,6 +7,44 @@ The goal is to demonstrate the **pub/sub façade** pattern: write the app once a
 `BroadcastBus` trait, swap the implementation between in-process Pekko Streams and NATS
 without touching the routes.
 
+## What is Hotwire?
+
+[Hotwire](https://hotwired.dev/) — short for "**H**TML **O**ver **T**he **WIRE**" — is
+37signals' alternative to building SPAs. The server renders HTML, the browser receives
+HTML, and small JavaScript libraries swap fragments of that HTML into the live DOM.
+There is no JSON API and no client-side routing. The wire format is the rendered page.
+
+The design philosophy in one paragraph (paraphrased from
+[hotwired.dev](https://hotwired.dev/)):
+
+> **Send HTML, not JSON.** Server-rendered HTML is the simplest possible format the
+> browser already understands. Most of what an SPA hand-rolls — routing, state
+> reconciliation, optimistic updates, JSON schemas — disappears when the server
+> stays in charge of HTML and the client just patches the DOM with what arrives
+> over a request or a WebSocket.
+
+Hotwire ships as three loosely-coupled pieces; this project only needs the first two:
+
+| Component                                                  | What it does                                                                              |
+| ---------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| **[Turbo](https://turbo.hotwired.dev/handbook/introduction)** | Drives navigation, partial updates (Frames), and live broadcasts (Streams) — no JSON.  |
+| **[Stimulus](https://stimulus.hotwired.dev/handbook/introduction)** | Tiny controllers for sprinkles of behaviour on existing HTML. Optional here.        |
+| **[Strada](https://strada.hotwired.dev/)**                 | Bridges Turbo apps into native iOS/Android shells. Out of scope for this project.         |
+
+**Turbo Streams** — the part this project leans on — is documented in detail in
+the [Turbo handbook → Streams](https://turbo.hotwired.dev/handbook/streams) and
+the [reference for `<turbo-stream>` actions](https://turbo.hotwired.dev/reference/streams).
+The wire format is intentionally tiny: a `<turbo-stream action="…" target="…"><template>…</template></turbo-stream>`
+element delivered either as the body of a `text/vnd.turbo-stream.html` HTTP response or
+as a UTF-8 text frame on a WebSocket. That is the entire protocol — see the
+[Turbo source for `stream_observer.js`](https://github.com/hotwired/turbo/blob/main/src/observers/stream_observer.js)
+if you want to verify.
+
+Why this matters for the Scala side: there is no client-side state to keep in sync, no
+JSON schema to maintain, and no GraphQL gateway to debug. The server's only job is to
+*render the right HTML at the right time*, and the bus in this project exists solely
+to fan that rendered HTML out to the right subscribers.
+
 ## What's in here
 
 ```
