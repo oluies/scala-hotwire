@@ -19,14 +19,15 @@ object Main:
 
   /** Which demo(s) to mount, selected via the `DEMO` env var (or `hotwire.demo`). */
   enum Demo:
-    case All, Chat, Posts
+    case All, Chat, Posts, Jobs
   object Demo:
     def parse(s: String): Demo = s.trim.toLowerCase match
       case "all" | ""   => All
       case "chat"       => Chat
       case "posts"      => Posts
+      case "jobs"       => Jobs
       case other        =>
-        sys.error(s"Unknown DEMO=$other (expected one of: all, chat, posts)")
+        sys.error(s"Unknown DEMO=$other (expected one of: all, chat, posts, jobs)")
 
   def main(args: Array[String]): Unit =
     val cfg     = ConfigFactory.load().getConfig("hotwire")
@@ -70,16 +71,23 @@ object Main:
           )
         case _ => None
 
-    val chatRoutes:   Option[Route] = busOpt.map(b => new ChatRoutes(b).routes)
+    val chatRoutes:   Option[Route] =
+      Option.when(demo == Demo.All || demo == Demo.Chat)(busOpt).flatten
+        .map(b => new ChatRoutes(b).routes)
     val replayRoutes: Option[Route] = replayBus.map(b => new ReplayChatRoutes(b).routes)
-    val postsRoutes:  Option[Route] = Option.when(demo != Demo.Chat)(new PostsRoutes().routes)
+    val postsRoutes:  Option[Route] =
+      Option.when(demo == Demo.All || demo == Demo.Posts)(new PostsRoutes().routes)
+    val jobsRoutes:   Option[Route] =
+      Option.when(demo == Demo.All || demo == Demo.Jobs)(busOpt).flatten
+        .map(b => new JobsRoutes(b).routes)
 
     val landing = demo match
       case Demo.Posts => "/posts"
+      case Demo.Jobs  => "/jobs"
       case _          => "/chat/lobby"
 
     val mounted: Seq[Route] =
-      chatRoutes.toSeq ++ replayRoutes.toSeq ++ postsRoutes.toSeq ++ Seq(
+      chatRoutes.toSeq ++ replayRoutes.toSeq ++ postsRoutes.toSeq ++ jobsRoutes.toSeq ++ Seq(
         pathPrefix("public") { getFromResourceDirectory("public") },
         pathSingleSlash { redirect(landing, StatusCodes.TemporaryRedirect) }
       )

@@ -1,0 +1,17 @@
+@(state: hotwire.JobsRoutes.JobState, csrfToken: String, wsUrl: String)
+@views.html.layout("Job " + state.id, csrfToken) {
+  <header>
+    <h1>Job @state.id</h1>
+    <p class="hint">Refresh, or open this page in a second tab — both will see the same ticks.</p>
+  </header>
+
+  <turbo-stream-source src="@wsUrl"></turbo-stream-source>
+
+  @if(state.done) {
+    @views.html._progress_done(state.id)
+  } else {
+    @views.html._progress(state.id, state.step, state.total)
+  }
+
+  <p><a href="/jobs">All jobs</a></p>
+}
