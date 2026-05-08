@@ -57,6 +57,10 @@ src/main/scala/hotwire/
   ChatRoutes.scala              # demo 1: chat room with form POST + WS fan-out
   PostsRoutes.scala             # demo 2: infinite-scroll feed via lazy <turbo-frame>
   Main.scala                    # boot — picks the bus based on $NATS_URL
+  examples/jetstream/           # JetStream replay example — see "Advanced example" below
+    ReplayableBroadcastBus.scala
+    JetStreamBroadcastBus.scala
+    ReplayChatRoutes.scala
 
 src/main/twirl/views/
   layout.scala.html             # base layout, Turbo from CDN, csrf-token meta
@@ -65,17 +69,20 @@ src/main/twirl/views/
   posts.scala.html              # the feed page + first lazy <turbo-frame>
   _posts_page.scala.html        # one page-of-posts wrapped in a <turbo-frame>
   _post.scala.html              # one post card
+  jetstream/chat.scala.html     # replay-chat page + <replaying-turbo-stream-source>
 
 src/main/resources/
   application.conf              # host/port/secret/nats-url config
   logback.xml
   public/style.css
+  public/jetstream/replay.js    # <replaying-turbo-stream-source> custom element
 
 src/test/scala/hotwire/
   InProcessBroadcastBusSpec.scala
   TurboStreamSpec.scala
   ChatRoutesSpec.scala
   PostsRoutesSpec.scala
+  examples/jetstream/SeqStampingSpec.scala
 ```
 
 Two demos, picked to show the two halves of Hotwire:
@@ -220,6 +227,81 @@ NATS_URL=nats://localhost:4222 PORT=8081 sbt run
 Open <http://localhost:8080/chat/lobby> in one tab and <http://localhost:8081/chat/lobby>
 in another. A message posted on either node fans out to subscribers on both.
 
+## Advanced example: JetStream with reconnect-replay
+
+A second chat lives at `/jetstream-chat/<room>` to demonstrate the most-asked
+production WS question: *what happens to messages a tab misses while its socket
+is closed?* Answer here: nothing, the tab backfills on reconnect.
+
+### How it works
+
+* **Bus** — `examples/jetstream/JetStreamBroadcastBus.scala` implements a separate
+  `ReplayableBroadcastBus` trait. `publishAndAck` blocks for the broker ack and
+  returns the assigned JetStream stream sequence; `subscribeFrom(topic, Some(n))`
+  opens an *ephemeral* JetStream consumer with `DeliverPolicy.ByStartSequence`
+  starting at `n + 1`, so a single subscription replays the backlog and then
+  transitions to the live tail.
+* **Stamping** — every `<turbo-stream>` fragment that reaches the browser carries
+  `data-seq="N"` (see `ReplayChatRoutes.SeqStamping`). The synchronous form-POST
+  response uses the seq returned by `publishAndAck`; broadcast frames use the seq
+  the consumer reports for each delivered message.
+* **Client** — `public/jetstream/replay.js` defines a
+  `<replaying-turbo-stream-source>` custom element that (a) tracks the highest
+  `data-seq` it has rendered in `localStorage` keyed by room, and (b) reconnects
+  with `?last_seq=N` on close with exponential backoff. No Stimulus or other JS
+  framework is pulled in.
+* **No per-tab server state** — the browser is the source of truth for "what
+  have I seen". The server just replays from whatever seq it's asked for.
+
+### Running
+
+Start a NATS server with JetStream enabled:
+
+```bash
+nats-server -js
+```
+
+Run the app pointed at it, with a stream name to activate the example:
+
+```bash
+NATS_URL=nats://localhost:4222 NATS_JS_STREAM=CHAT_REPLAY sbt run
+```
+
+Open <http://localhost:8080/jetstream-chat/lobby> in two tabs.
+
+### Validating replay (manual)
+
+1. Open `/jetstream-chat/lobby` in **tab A** and **tab B**.
+2. Post a message from A — both tabs render it. The DOM fragment carries `data-seq`.
+3. In tab B, open devtools → Network tab → switch to "Offline" (this also closes
+   the WebSocket).
+4. Post 2-3 messages from tab A. Tab B does *not* see them (offline).
+5. Switch tab B back to "Online". The custom element reconnects with
+   `?last_seq=N`, and tab B backfills the missed messages, in order.
+
+You can also confirm the replay window is bounded by the stream's
+`maxMessagesPerSubject` / `maxAge` config — older messages beyond the retention
+limit are not replayed.
+
+### Storage trade-offs
+
+Stream defaults: `maxMessagesPerSubject=1000`, `maxAge=24h`, file-backed. Tune via
+`JetStreamBroadcastBus.connectAndEnsureStream` arguments. For a true durable chat
+log you'd switch to subject-keyed Key-Value or a real DB; for ephemeral
+"reconnect within a few minutes" replay, the defaults are fine.
+
+### What this example does *not* do
+
+* **Per-user authorization on replay.** A tab can request `?last_seq=0` and get
+  the full retained history. Add auth + a per-room ACL in front before exposing
+  this on the public internet.
+* **Durable consumers.** Each reconnect creates and tears down an ephemeral
+  consumer. For thousands of concurrent subscribers, switch to one durable
+  consumer per `(user, topic)` and have the server track ack seqs.
+* **Catch-up rate limiting.** A tab that backfills 10k messages will see them
+  arrive as fast as JetStream can deliver. Add a `Throttle` stage on the
+  replay source if backfills can be large.
+
 ## Tests
 
 ```bash
@@ -229,10 +311,11 @@ sbt test
 The `InProcessBroadcastBusSpec` exercises subscribe-after, topic isolation, multi-
 subscriber fan-out, and the post-subscription delivery semantic. `TurboStreamSpec`
 covers the wrapper format and attribute escaping. `ChatRoutesSpec` covers the CSRF
-directive and the `text/vnd.turbo-stream.html` content type.
+directive and the `text/vnd.turbo-stream.html` content type. `SeqStampingSpec`
+exercises the `data-seq` insertion used by the JetStream replay example.
 
-NATS isn't covered by automated tests because it requires a running broker; run the
-two-node manual procedure above to validate.
+NATS and JetStream aren't covered by automated tests because they require a running
+broker; run the two-node and replay manual procedures above to validate.
 
 ## Wire-protocol cheatsheet
 
@@ -256,8 +339,10 @@ socket and pipes every text frame straight into Turbo's stream observer.
 * **Stimulus controllers.** Turbo alone covers the broadcast/append flow shown here.
   Add Stimulus when you need per-element JS behaviour (e.g. "auto-scroll to bottom
   on new message"). It's pure client-side and unrelated to the server design.
-* **JetStream durable consumers.** Add a `JetStreamBroadcastBus` implementation when
-  you need replay-on-reconnect. The trait stays the same.
+* **JetStream durable consumers.** The advanced example uses *ephemeral* consumers
+  with start-sequence — fine for "tab reconnects within retention window" replay,
+  but not for at-least-once delivery to a known cohort. Switch to one durable
+  consumer per `(user, topic)` and persist ack seqs server-side when you need that.
 * **Origin checking on the WS upgrade.** For production behind a public origin, add
   a `headerValueByName("Origin")` check in `streams/chat/<room>` and reject mismatches.
 

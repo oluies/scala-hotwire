@@ -1,0 +1,140 @@
+package hotwire.examples.jetstream
+
+import hotwire.{ChatRoutes, CsrfSupport, TurboStream, TwirlSupport}
+import hotwire.examples.jetstream.ReplayChatRoutes.SeqStamping
+import org.apache.pekko.NotUsed
+import org.apache.pekko.http.scaladsl.model.ws.{Message, TextMessage}
+import org.apache.pekko.http.scaladsl.server.Directives.*
+import org.apache.pekko.http.scaladsl.server.Route
+import org.apache.pekko.stream.scaladsl.{Flow, Sink, Source}
+
+import java.time.Instant
+import java.util.UUID
+import java.util.concurrent.atomic.AtomicLong
+import scala.collection.concurrent.TrieMap
+
+/** Same demo as [[hotwire.ChatRoutes]], but built on a [[ReplayableBroadcastBus]].
+  *
+  * Routes are mounted under `/jetstream-chat/<room>` so the page coexists with the
+  * core-NATS demo. Two things are different from the simpler chat:
+  *
+  *   1. Every `<turbo-stream>` fragment that reaches the browser carries a
+  *      `data-seq="N"` attribute, where N is the JetStream stream sequence assigned
+  *      by the broker. That includes both the synchronous form-POST response and
+  *      the WS broadcast — see [[SeqStamping.stamp]].
+  *
+  *   2. The WS upgrade reads `?last_seq=N` from the query string. When present, the
+  *      server opens an ephemeral JetStream consumer at `N+1`, which delivers the
+  *      backlog and then transitions to live tail. Tabs that drop the WS during a
+  *      network blip and reconnect therefore backfill instead of silently losing
+  *      messages.
+  */
+final class ReplayChatRoutes(bus: ReplayableBroadcastBus):
+  import ChatRoutes.ChatMessage
+  import TwirlSupport.given
+
+  private val rooms      = TrieMap.empty[String, Vector[ChatMessage]]
+  private val latestSeqs = TrieMap.empty[String, AtomicLong]
+
+  private def history(room: String): Vector[ChatMessage] =
+    rooms.getOrElse(room, Vector.empty)
+
+  private def append(room: String, msg: ChatMessage): Unit =
+    rooms.updateWith(room)(prev => Some(prev.getOrElse(Vector.empty) :+ msg))
+    ()
+
+  private def latestSeqFor(room: String): AtomicLong =
+    latestSeqs.getOrElseUpdate(room, new AtomicLong(0L))
+
+  private def topicFor(room: String): String = s"jschat:$room"
+
+  val routes: Route =
+    concat(
+      pathPrefix("jetstream-chat" / Segment) { room =>
+        concat(
+          pathEndOrSingleSlash {
+            get {
+              CsrfSupport.withCsrfToken { csrf =>
+                extractRequest { req =>
+                  val scheme = if req.uri.scheme == "https" then "wss" else "ws"
+                  val wsUrl  = s"$scheme://${req.uri.authority}/jetstream-streams/chat/$room"
+                  val initial = latestSeqFor(room).get()
+                  complete(views.html.jetstream.chat(history(room), csrf, room, wsUrl, initial))
+                }
+              }
+            }
+          },
+          path("messages") {
+            post {
+              CsrfSupport.withCsrfToken { csrf =>
+                CsrfSupport.requireCsrf(csrf) {
+                  formField("author") { author =>
+                    formField("body") { body =>
+                      val msg = ChatMessage(
+                        id = UUID.randomUUID().toString.take(8),
+                        author = sanitise(author).take(40),
+                        body = sanitise(body).take(500),
+                        timestamp = Instant.now()
+                      )
+                      append(room, msg)
+
+                      val fragment = TurboStream.stream(
+                        action = TurboStream.Action.Append,
+                        target = "messages",
+                        content = views.html._message(msg)
+                      )
+
+                      val seq     = bus.publishAndAck(topicFor(room), fragment)
+                      latestSeqFor(room).updateAndGet(prev => math.max(prev, seq))
+                      val stamped = SeqStamping.stamp(fragment, seq)
+
+                      import TurboStream.given
+                      complete(stamped)
+                    }
+                  }
+                }
+              }
+            }
+          }
+        )
+      },
+      path("jetstream-streams" / "chat" / Segment) { room =>
+        parameter("last_seq".as[Long].optional) { lastSeq =>
+          val frames: Source[(Long, String), NotUsed] =
+            bus.subscribeFrom(topicFor(room), lastSeq)
+
+          val outbound: Source[Message, NotUsed] =
+            frames.map { case (seq, html) =>
+              latestSeqFor(room).updateAndGet(prev => math.max(prev, seq))
+              TextMessage(SeqStamping.stamp(html, seq))
+            }
+
+          val flow = Flow.fromSinkAndSourceCoupled(Sink.ignore, outbound)
+          handleWebSocketMessages(flow)
+        }
+      }
+    )
+
+  private def sanitise(s: String): String =
+    s.filter(c => !c.isControl || c == '\n').trim
+
+object ReplayChatRoutes:
+
+  /** Inserts a `data-seq="N"` attribute on the *first* `<turbo-stream` element of an
+    * already-rendered fragment. The fragment is generated by our own
+    * [[hotwire.TurboStream]] helper so the structure is predictable: it always starts
+    * with the literal `<turbo-stream ` (note the trailing space).
+    *
+    * Idempotent: if a `data-seq="…"` is already present it is left untouched. */
+  object SeqStamping:
+    private val needle = "<turbo-stream "
+
+    def stamp(fragment: String, seq: Long): String =
+      if fragment.contains("data-seq=") then fragment
+      else
+        val idx = fragment.indexOf(needle)
+        if idx < 0 then fragment
+        else
+          val insertAt = idx + needle.length
+          val (before, after) = fragment.splitAt(insertAt)
+          s"""${before}data-seq="$seq" $after"""
