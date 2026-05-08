@@ -3,9 +3,10 @@ package hotwire
 import munit.FunSuite
 import org.apache.pekko.actor.typed.ActorSystem
 import org.apache.pekko.actor.typed.scaladsl.Behaviors
-import org.apache.pekko.stream.scaladsl.Sink
+import org.apache.pekko.stream.testkit.TestSubscriber
 import org.apache.pekko.stream.testkit.scaladsl.TestSink
 
+import java.util.UUID
 import scala.concurrent.duration.*
 
 class InProcessBroadcastBusSpec extends FunSuite:
@@ -16,10 +17,50 @@ class InProcessBroadcastBusSpec extends FunSuite:
   override def afterAll(): Unit =
     system.terminate()
 
-  test("subscriber receives messages published after subscription") {
-    val bus  = new InProcessBroadcastBus()
-    val probe = bus.subscribe("topic.a").runWith(TestSink[String]())
-    probe.request(2)
+  /** Materialise a subscriber and synchronise with the BroadcastHub by publishing a
+    * unique sentinel until it round-trips. After this returns, subsequent publishes
+    * on the topic are guaranteed to reach the probe.
+    *
+    * Without this dance the test is racy: `runWith` returns before the new consumer
+    * is registered with the BroadcastHub, so a publish that happens right after can
+    * be delivered only to the anchor consumer. Local hardware happens to win the
+    * race; CI's slower runner doesn't.
+    *
+    * Each probe filters out sentinels that aren't its own, so a later
+    * `hotSubscribe` on the same topic can't pollute an earlier probe's stream
+    * with that-probe's sync messages.
+    */
+  private val SentinelPrefix = "__sync__"
+
+  private def hotSubscribe(bus: BroadcastBus, topic: String): TestSubscriber.Probe[String] =
+    val mine     = SentinelPrefix + UUID.randomUUID().toString
+    val probe    = bus.subscribe(topic)
+      .filterNot(s => s.startsWith(SentinelPrefix) && s != mine)
+      .runWith(TestSink[String]())
+    probe.request(Long.MaxValue / 2)
+
+    val deadline = System.currentTimeMillis + 5000
+    var synced   = false
+    while !synced && System.currentTimeMillis < deadline do
+      bus.publish(topic, mine)
+      try
+        probe.expectNext(200.millis, mine)
+        synced = true
+      catch case _: AssertionError => ()
+
+    if !synced then sys.error(s"Failed to sync subscriber on '$topic' within 5s")
+
+    // Drain any duplicates of our own sentinel still in flight.
+    var draining = true
+    while draining do
+      try probe.expectNext(50.millis, mine)
+      catch case _: AssertionError => draining = false
+
+    probe
+
+  test("subscriber receives messages in publish order") {
+    val bus   = new InProcessBroadcastBus()
+    val probe = hotSubscribe(bus, "topic.a")
 
     bus.publish("topic.a", "<turbo-stream>1</turbo-stream>")
     bus.publish("topic.a", "<turbo-stream>2</turbo-stream>")
@@ -31,9 +72,8 @@ class InProcessBroadcastBusSpec extends FunSuite:
 
   test("topics are isolated") {
     val bus = new InProcessBroadcastBus()
-    val a = bus.subscribe("a").runWith(TestSink[String]())
-    val b = bus.subscribe("b").runWith(TestSink[String]())
-    a.request(1); b.request(1)
+    val a   = hotSubscribe(bus, "a")
+    val b   = hotSubscribe(bus, "b")
 
     bus.publish("a", "ax")
     bus.publish("b", "bx")
@@ -47,9 +87,8 @@ class InProcessBroadcastBusSpec extends FunSuite:
 
   test("multiple subscribers on the same topic each receive every message") {
     val bus = new InProcessBroadcastBus()
-    val s1 = bus.subscribe("t").runWith(TestSink[String]())
-    val s2 = bus.subscribe("t").runWith(TestSink[String]())
-    s1.request(1); s2.request(1)
+    val s1  = hotSubscribe(bus, "t")
+    val s2  = hotSubscribe(bus, "t")
 
     bus.publish("t", "hello")
 
@@ -62,8 +101,7 @@ class InProcessBroadcastBusSpec extends FunSuite:
     val bus = new InProcessBroadcastBus()
     bus.publish("t2", "early") // anchor consumer drains; no subscriber yet
 
-    val probe = bus.subscribe("t2").runWith(TestSink[String]())
-    probe.request(1)
+    val probe = hotSubscribe(bus, "t2")
     probe.expectNoMessage(200.millis) // 'early' is gone
 
     bus.publish("t2", "late")
