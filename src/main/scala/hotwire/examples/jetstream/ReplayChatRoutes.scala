@@ -10,42 +10,46 @@ import org.apache.pekko.stream.scaladsl.{Flow, Sink, Source}
 
 import java.time.Instant
 import java.util.UUID
-import scala.collection.concurrent.TrieMap
 
 /** Same demo as [[hotwire.ChatRoutes]], but built on a [[ReplayableBroadcastBus]].
   *
   * Routes are mounted under `/jetstream-chat/<room>` so the page coexists with the
-  * core-NATS demo. Two things are different from the simpler chat:
+  * core-NATS demo. Three things are different from the simpler chat:
   *
   *   1. Every `<turbo-stream>` fragment that reaches the browser carries a
   *      `data-seq="N"` attribute, where N is the JetStream stream sequence assigned
   *      by the broker. That includes both the synchronous form-POST response and
   *      the WS broadcast — see [[SeqStamping.stamp]].
   *
-  *   2. The WS upgrade reads `?last_seq=N` from the query string. When present, the
-  *      server opens an ephemeral JetStream consumer at `N+1`, which delivers the
-  *      backlog and then transitions to live tail. Tabs that drop the WS during a
-  *      network blip and reconnect therefore backfill instead of silently losing
-  *      messages.
+  *   2. The WS upgrade requires `?last_seq=N` (always sent by the client). N=0
+  *      means "from the start of the retention window" — a fresh tab backfills
+  *      the entire retention window via the WebSocket. N>0 means "strictly after
+  *      N" — a reconnecting tab backfills only what it missed and then transitions
+  *      to live tail on the same subscription.
+  *
+  *   3. There is no server-side message history. The page renders empty and is
+  *      filled by the WS replay, so the broker is the single source of truth for
+  *      what each tab has seen. This avoids a class of bugs where the rendered
+  *      history (per-node, per-process) and the seq pointer (broker-wide) drift
+  *      apart and cause silent message loss — see the bug_001 follow-up in
+  *      `reviewmemory/pr_ultrareview4.md`.
+  *
+  * The `<room>` URL segment is restricted to `[a-zA-Z0-9_-]+` because NATS treats
+  * `*` and `>` as wildcard characters in subject filters. Without this guard a
+  * caller could open `/jetstream-streams/chat/%3E?last_seq=0` and have the bus
+  * subscribe to `jschat.>`, exfiltrating every retained message in every room.
   */
 final class ReplayChatRoutes(bus: ReplayableBroadcastBus):
   import ChatRoutes.ChatMessage
   import TwirlSupport.given
 
-  private val rooms = TrieMap.empty[String, Vector[ChatMessage]]
-
-  private def history(room: String): Vector[ChatMessage] =
-    rooms.getOrElse(room, Vector.empty)
-
-  private def append(room: String, msg: ChatMessage): Unit =
-    rooms.updateWith(room)(prev => Some(prev.getOrElse(Vector.empty) :+ msg))
-    ()
+  private val Room = "[a-zA-Z0-9_-]+".r
 
   private def topicFor(room: String): String = s"jschat:$room"
 
   val routes: Route =
     concat(
-      pathPrefix("jetstream-chat" / Segment) { room =>
+      pathPrefix("jetstream-chat" / Room) { room =>
         concat(
           pathEndOrSingleSlash {
             get {
@@ -53,8 +57,7 @@ final class ReplayChatRoutes(bus: ReplayableBroadcastBus):
                 extractRequest { req =>
                   val scheme = if req.uri.scheme == "https" then "wss" else "ws"
                   val wsUrl  = s"$scheme://${req.uri.authority}/jetstream-streams/chat/$room"
-                  val initial = bus.latestSeq(topicFor(room))
-                  complete(views.html.jetstream.chat(history(room), csrf, room, wsUrl, initial))
+                  complete(views.html.jetstream.chat(csrf, room, wsUrl))
                 }
               }
             }
@@ -71,7 +74,6 @@ final class ReplayChatRoutes(bus: ReplayableBroadcastBus):
                         body = sanitise(body).take(500),
                         timestamp = Instant.now()
                       )
-                      append(room, msg)
 
                       val fragment = TurboStream.stream(
                         action = TurboStream.Action.Append,
@@ -92,12 +94,12 @@ final class ReplayChatRoutes(bus: ReplayableBroadcastBus):
           }
         )
       },
-      path("jetstream-streams" / "chat" / Segment) { room =>
+      path("jetstream-streams" / "chat" / Room) { room =>
         parameter("last_seq".as[Long].optional) { lastSeq =>
-          // Negative or otherwise-bogus values resolve to live tail rather than
-          // a JetStream subscribe failure. The bus also defends against this,
-          // but rejecting at the route boundary keeps the bus from spinning up
-          // an ephemeral consumer just to have it fail.
+          // Negative values resolve to live tail rather than a JetStream
+          // subscribe failure. The bus also defends against this; rejecting
+          // at the route boundary avoids spinning up an ephemeral consumer
+          // just to have it fail.
           val sanitisedLastSeq = lastSeq.filter(_ >= 0L)
 
           val frames: Source[(Long, String), NotUsed] =

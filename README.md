@@ -253,6 +253,13 @@ is closed?* Answer here: nothing, the tab backfills on reconnect.
   framework is pulled in.
 * **No per-tab server state** — the browser is the source of truth for "what
   have I seen". The server just replays from whatever seq it's asked for.
+* **No server-rendered history either** — the page renders an empty
+  `#messages` div on first load and is filled by the WebSocket replay (a fresh
+  tab opens the WS with `?last_seq=0`, which JetStream interprets as "from the
+  start of the retention window"). The broker is the *only* source of truth
+  for what's in the room. This avoids a class of bugs where a per-node
+  in-memory `Vector[ChatMessage]` drifts out of sync with the broker-wide seq
+  pointer and silently loses messages on JVM restart or multi-node deployment.
 
 ### Running
 

@@ -13,7 +13,6 @@ import io.nats.client.{
   Dispatcher,
   JetStream,
   JetStreamApiException,
-  JetStreamManagement,
   Message,
   MessageHandler,
   Nats,
@@ -29,7 +28,6 @@ import org.apache.pekko.stream.scaladsl.{BroadcastHub, Keep, Sink, Source, Sourc
 import java.nio.charset.StandardCharsets
 import java.time.Duration
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.AtomicLong
 import scala.concurrent.Future
 
 /** Cross-node pub/sub backed by NATS JetStream with reconnect-replay.
@@ -43,8 +41,10 @@ import scala.concurrent.Future
   *   2. `subscribeFrom(topic, Some(n))` opens an *ephemeral* push consumer with
   *      [[DeliverPolicy.ByStartSequence]] starting at `n + 1`, so a browser tab that
   *      reconnects after a network blip backfills the messages it missed before
-  *      switching to the live tail. No server-side per-tab state is needed; the
-  *      browser is the source of truth for "what have I seen".
+  *      switching to the live tail. `Some(0)` therefore replays the entire retention
+  *      window — used by fresh tabs, since this example does not render history
+  *      server-side. No server-side per-tab state is needed; the browser is the
+  *      source of truth for "what have I seen".
   *
   * The same [[org.apache.pekko.stream.scaladsl.BroadcastHub]] + dropHead queue shape
   * as the core-NATS bus is used to insulate JetStream's dispatcher thread from a
@@ -53,6 +53,11 @@ import scala.concurrent.Future
   * Stream layout: a single JetStream stream covers the configured subjects wildcard
   * (`jschat.>` by default — see [[JetStreamBroadcastBus.connectAndEnsureStream]])
   * with limits-based retention. Per-subject limits keep each room bounded.
+  *
+  * Subject hardening: [[topicToSubject]] rejects topics containing the NATS
+  * wildcard characters `*` and `>`. Routes are expected to validate their
+  * `<room>` segment first, but the bus refuses to silently broaden a consumer
+  * filter beyond the intended subject as defense in depth.
   */
 final class JetStreamBroadcastBus(
     connection: Connection,
@@ -63,8 +68,7 @@ final class JetStreamBroadcastBus(
 
   private given ec: scala.concurrent.ExecutionContext = system.executionContext
 
-  private val js: JetStream            = connection.jetStream()
-  private val jsm: JetStreamManagement = connection.jetStreamManagement()
+  private val js: JetStream = connection.jetStream()
 
   private final case class LiveHub(
       dispatcher: Dispatcher,
@@ -77,22 +81,14 @@ final class JetStreamBroadcastBus(
     * each tab carries a different last_seq. */
   private val liveHubs = new ConcurrentHashMap[String, LiveHub]()
 
-  /** In-memory cache of "highest seq we have observed per topic", populated by the
-    * publish path and any active push consumer. The renderer reads this for the
-    * `data-initial-seq` attribute on the chat page; on a cold node where neither
-    * a local POST nor an active subscriber has bumped this yet, [[latestSeq]]
-    * falls back to a JetStream stream-info round-trip. */
-  private val seqCache = new ConcurrentHashMap[String, AtomicLong]()
-
   private def topicToSubject(topic: String): String =
-    topic.replace(':', '.').replace('/', '.')
-
-  private def cachedSeq(topic: String): AtomicLong =
-    seqCache.computeIfAbsent(topic, _ => new AtomicLong(0L))
-
-  private def bump(topic: String, seq: Long): Unit =
-    cachedSeq(topic).updateAndGet(prev => math.max(prev, seq))
-    ()
+    val subject = topic.replace(':', '.').replace('/', '.')
+    if subject.indexOf('*') >= 0 || subject.indexOf('>') >= 0 then
+      throw new IllegalArgumentException(
+        s"Topic produced a NATS subject containing wildcard chars (* or >); " +
+          s"this would broaden the consumer filter beyond the intended subject: $subject"
+      )
+    subject
 
   private def buildLiveHub(topic: String): LiveHub =
     val (queue, raw) =
@@ -108,7 +104,6 @@ final class JetStreamBroadcastBus(
     val handler: MessageHandler = (msg: Message) =>
       val seq     = msg.metaData().streamSequence()
       val payload = new String(msg.getData, StandardCharsets.UTF_8)
-      bump(topic, seq)
       queue.offer((seq, payload))
       ()
 
@@ -159,7 +154,6 @@ final class JetStreamBroadcastBus(
         val handler: MessageHandler = (msg: Message) =>
           val seq     = msg.metaData().streamSequence()
           val payload = new String(msg.getData, StandardCharsets.UTF_8)
-          bump(topic, seq)
           queue.offer((seq, payload))
           ()
 
@@ -188,9 +182,7 @@ final class JetStreamBroadcastBus(
     val subject = topicToSubject(topic)
     val opts    = PublishOptions.builder().expectedStream(streamName).build()
     val ack     = js.publish(subject, html.getBytes(StandardCharsets.UTF_8), opts)
-    val seq     = ack.getSeqno
-    bump(topic, seq)
-    seq
+    ack.getSeqno
 
   override def subscribe(topic: String): Source[String, NotUsed] =
     subscribeFrom(topic, None).map(_._2)
@@ -200,26 +192,9 @@ final class JetStreamBroadcastBus(
       lastSeq: Option[Long]
   ): Source[(Long, String), NotUsed] =
     lastSeq match
-      case None                  => liveHubFor(topic).source
-      case Some(n) if n < 0L     => liveHubFor(topic).source
-      case Some(n)               => replaySource(topic, n)
-
-  /** Highest known seq for `topic`. Returns the in-memory cache when populated
-    * (bumped by every publish, live-tail delivery, and replay delivery on this
-    * node), and otherwise falls back to a `getLastMessage` query against the
-    * broker. Returns `0L` when there is no message on the subject (or the
-    * broker query fails — callers should treat `0L` as "unknown, render with
-    * data-initial-seq=0" rather than as a real seq). */
-  override def latestSeq(topic: String): Long =
-    val cached = cachedSeq(topic).get()
-    if cached > 0L then cached
-    else
-      try
-        val info = jsm.getLastMessage(streamName, topicToSubject(topic))
-        val seq  = if info == null then 0L else info.getSeq
-        bump(topic, seq)
-        seq
-      catch case _: Throwable => 0L
+      case None              => liveHubFor(topic).source
+      case Some(n) if n < 0L => liveHubFor(topic).source
+      case Some(n)           => replaySource(topic, n)
 
   override def shutdown(): Future[Unit] = Future {
     liveHubs.values().forEach { h =>
