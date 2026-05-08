@@ -1,0 +1,13 @@
+@(items: Seq[hotwire.PostsRoutes.Post], page: Int, totalPages: Int)
+<turbo-frame id="posts-page-@page">
+  @for(post <- items) {
+    @views.html._post(post)
+  }
+  @if(page < totalPages) {
+    <turbo-frame id="posts-page-@(page + 1)" loading="lazy" src="/posts/page/@(page + 1)">
+      <p class="loading">Loading page @(page + 1)…</p>
+    </turbo-frame>
+  } else {
+    <p class="end-of-feed">— end of feed —</p>
+  }
+</turbo-frame>

@@ -54,13 +54,17 @@ src/main/scala/hotwire/
   NatsBroadcastBus.scala        # jnats Connection + Dispatcher, dropHead overflow
   TurboStream.scala             # text/vnd.turbo-stream.html marshaller + helpers
   CsrfSupport.scala             # double-submit cookie CSRF directive
-  ChatRoutes.scala              # demo: chat room with form POST + WS fan-out
+  ChatRoutes.scala              # demo 1: chat room with form POST + WS fan-out
+  PostsRoutes.scala             # demo 2: infinite-scroll feed via lazy <turbo-frame>
   Main.scala                    # boot — picks the bus based on $NATS_URL
 
 src/main/twirl/views/
   layout.scala.html             # base layout, Turbo from CDN, csrf-token meta
   chat.scala.html               # the room page + <turbo-stream-source>
   _message.scala.html           # one message row
+  posts.scala.html              # the feed page + first lazy <turbo-frame>
+  _posts_page.scala.html        # one page-of-posts wrapped in a <turbo-frame>
+  _post.scala.html              # one post card
 
 src/main/resources/
   application.conf              # host/port/secret/nats-url config
@@ -71,7 +75,24 @@ src/test/scala/hotwire/
   InProcessBroadcastBusSpec.scala
   TurboStreamSpec.scala
   ChatRoutesSpec.scala
+  PostsRoutesSpec.scala
 ```
+
+Two demos, picked to show the two halves of Hotwire:
+
+| Demo                                | Mechanism                                     | Bus needed?         |
+| ----------------------------------- | --------------------------------------------- | ------------------- |
+| `/chat/<room>` — live chat          | Turbo Streams over WebSocket + form POST      | yes (broadcast bus) |
+| `/posts` — infinite-scroll feed     | Lazy `<turbo-frame>` walking pages of HTML    | no — plain HTTP     |
+
+The chat demo is the case for the bus. The feed demo is the case *against* reaching
+for it by default: pagination is one-directional and ephemeral, so no WebSocket, no
+broadcast, no client state — just a chain of `<turbo-frame loading="lazy">` requests
+walking page by page. See the
+[Cycode post on infinite-scroll pagination with Hotwire](https://cycode.com/blog/infinite-scrolling-pagination-hotwire/)
+for the original Rails treatment of the pattern, and
+["Hotwire's Dark Side: When Real-Time Isn't Worth It"](https://dev.to/alex_aslam/hotwires-dark-side-when-real-time-isnt-worth-it-167a)
+for the cost case against putting *everything* on a stream.
 
 ## How the pub/sub façade works
 
@@ -132,6 +153,47 @@ sbt run
 Open <http://localhost:8080/chat/lobby> in two browser tabs and chat. Messages
 appear in both tabs without a page reload — the synchronous Turbo Stream HTTP
 response feeds the submitter, the WebSocket feeds everyone else.
+
+Then open <http://localhost:8080/posts> and scroll. Each time the bottom
+`<turbo-frame loading="lazy">` enters the viewport, Turbo fetches `/posts/page/N`,
+which returns a `<turbo-frame id="posts-page-N">` containing the next ten posts
+*plus* a fresh lazy placeholder for page N+1. The chain walks itself until the last
+page returns no further placeholder. Open the network panel to confirm: it's a
+sequence of plain `text/html` GETs, not a single long-lived stream.
+
+### Picking which demo to mount
+
+`sbt run` mounts both demos on a single server. To focus on one in isolation, set
+the `DEMO` env var:
+
+```bash
+DEMO=all   sbt run    # default — both demos (chat + posts)
+DEMO=chat  sbt run    # only /chat/<room>; / redirects to /chat/lobby; no PostsRoutes
+DEMO=posts sbt run    # only /posts;       / redirects to /posts;       no bus, no chat
+```
+
+`DEMO=posts` is genuinely lighter: it skips `BroadcastBus` construction entirely (no
+in-process hub, and crucially no NATS connection attempt even if `NATS_URL` is set),
+since the feed demo never publishes or subscribes. Useful when you're poking at
+turbo-frames and don't want the WebSocket / bus machinery in the picture.
+
+### Infinite-scroll wire pattern
+
+```html
+<!-- on the page after first render -->
+<turbo-frame id="posts-page-2" loading="lazy" src="/posts/page/2"></turbo-frame>
+
+<!-- /posts/page/2 returns -->
+<turbo-frame id="posts-page-2">
+  …10 post cards…
+  <turbo-frame id="posts-page-3" loading="lazy" src="/posts/page/3"></turbo-frame>
+</turbo-frame>
+```
+
+Turbo matches frames by id, so the response's `posts-page-2` frame's children
+replace the existing `posts-page-2` frame's children. Those children include a
+*new* lazy frame with a different id, which is what triggers the next fetch. The
+last page renders no inner placeholder, terminating the chain.
 
 ### Switching to NATS
 
