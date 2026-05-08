@@ -1,0 +1,22 @@
+@(messages: Seq[hotwire.ChatRoutes.ChatMessage], csrfToken: String, room: String, wsUrl: String)
+@views.html.layout("Chat: " + room, csrfToken) {
+  <header>
+    <h1>Chat — @room</h1>
+    <p class="hint">Open this page in two tabs to see Turbo Streams broadcast in real time.</p>
+  </header>
+
+  <turbo-stream-source src="@wsUrl"></turbo-stream-source>
+
+  <div id="messages" class="messages">
+    @for(msg <- messages) {
+      @views.html._message(msg)
+    }
+  </div>
+
+  <form action="/chat/@room/messages" method="post" class="compose">
+    <input type="hidden" name="_csrf" value="@csrfToken">
+    <input type="text" name="author" placeholder="Your name" required maxlength="40" autocomplete="off">
+    <input type="text" name="body" placeholder="Say something…" required maxlength="500" autocomplete="off" autofocus>
+    <button type="submit">Send</button>
+  </form>
+}

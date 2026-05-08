@@ -1,0 +1,6 @@
+@(msg: hotwire.ChatRoutes.ChatMessage)
+<div class="message" id="message-@msg.id">
+  <strong class="author">@msg.author</strong>
+  <span class="body">@msg.body</span>
+  <time datetime="@msg.timestamp.toString">@msg.displayTime</time>
+</div>
