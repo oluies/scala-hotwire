@@ -1,0 +1,24 @@
+@(items: Seq[hotwire.JobsRoutes.JobState], csrfToken: String)
+@views.html.layout("Jobs", csrfToken) {
+  <header>
+    <h1>Jobs</h1>
+    <p class="hint">Start a job and watch its progress bar tick. Each tick is one Turbo Stream frame on a WebSocket.</p>
+  </header>
+
+  <form action="/jobs" method="post" class="compose">
+    <input type="hidden" name="_csrf" value="@csrfToken">
+    <button type="submit">Start a job</button>
+  </form>
+
+  <ul class="jobs">
+    @for(j <- items) {
+      <li>
+        <a href="/jobs/@j.id">Job @j.id</a> — @j.percent%
+        @if(j.done) { <em>(done)</em> }
+      </li>
+    }
+    @if(items.isEmpty) {
+      <li class="hint">No jobs yet — start one above.</li>
+    }
+  </ul>
+}

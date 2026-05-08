@@ -1,0 +1,5 @@
+@(id: String, step: Int, total: Int)
+<div id="job-@(id)-progress" class="job-progress">
+  <progress value="@step" max="@total">@step/@total</progress>
+  <span>@step / @total widgets reticulated</span>
+</div>
