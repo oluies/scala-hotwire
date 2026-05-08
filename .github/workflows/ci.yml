@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: sbt test (JDK ${{ matrix.java }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        java: ['21', '25']
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Temurin JDK ${{ matrix.java }}
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.java }}
+
+      - name: Set up sbt
+        uses: sbt/setup-sbt@v1
+
+      - name: Cache Coursier / Ivy / sbt
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/coursier
+            ~/.ivy2/cache
+            ~/.sbt
+          key: ${{ runner.os }}-sbt-${{ matrix.java }}-${{ hashFiles('**/build.sbt', 'project/**') }}
+          restore-keys: |
+            ${{ runner.os }}-sbt-${{ matrix.java }}-
+            ${{ runner.os }}-sbt-
+
+      - name: Compile
+        run: sbt -batch -no-colors "Test / compile"
+
+      - name: Test
+        run: sbt -batch -no-colors test

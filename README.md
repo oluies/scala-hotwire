@@ -1,5 +1,7 @@
 # scala-hotwire
 
+[![CI](https://github.com/oluies/scala-hotwire/actions/workflows/ci.yml/badge.svg)](https://github.com/oluies/scala-hotwire/actions/workflows/ci.yml)
+
 A minimal but real Hotwire (Turbo Streams) backend in Scala 3, on top of Pekko HTTP.
 The goal is to demonstrate the **pub/sub façade** pattern: write the app once against a
 `BroadcastBus` trait, swap the implementation between in-process Pekko Streams and NATS
