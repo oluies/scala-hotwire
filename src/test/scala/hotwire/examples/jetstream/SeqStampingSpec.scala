@@ -47,3 +47,17 @@ class SeqStampingSpec extends FunSuite:
     val notATurboStream = "<div>just html</div>"
     assertEquals(SeqStamping.stamp(notATurboStream, 5L), notATurboStream)
   }
+
+  test("template body containing 'data-seq=' does not block stamping") {
+    // Twirl HTML-escapes <, >, &, and quotes but not '=' or alphanumerics, so a
+    // user message body like "Hi data-seq= world" reaches the wrapper as-is.
+    val fragment = TurboStream.stream(
+      action  = TurboStream.Action.Append,
+      target  = "messages",
+      content = Html("""<span class="body">Hi data-seq= world</span>""")
+    )
+    val stamped = SeqStamping.stamp(fragment, 13L)
+    assert(stamped.startsWith("""<turbo-stream data-seq="13" """), stamped)
+    // The user-content occurrence inside the template survives untouched.
+    assert(stamped.contains("Hi data-seq= world"), stamped)
+  }

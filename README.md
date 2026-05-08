@@ -247,7 +247,8 @@ is closed?* Answer here: nothing, the tab backfills on reconnect.
   the consumer reports for each delivered message.
 * **Client** — `public/jetstream/replay.js` defines a
   `<replaying-turbo-stream-source>` custom element that (a) tracks the highest
-  `data-seq` it has rendered in `localStorage` keyed by room, and (b) reconnects
+  `data-seq` it has rendered in `sessionStorage` (per-tab, not per-origin so two
+  tabs in the same room don't corrupt each other's progress marker), and (b) reconnects
   with `?last_seq=N` on close with exponential backoff. No Stimulus or other JS
   framework is pulled in.
 * **No per-tab server state** — the browser is the source of truth for "what

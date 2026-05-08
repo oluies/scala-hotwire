@@ -30,3 +30,11 @@ trait ReplayableBroadcastBus extends BroadcastBus:
   /** Subscribe starting strictly *after* `lastSeq`. `None` means "live tail from now",
     * matching the semantics of plain [[BroadcastBus.subscribe]]. */
   def subscribeFrom(topic: String, lastSeq: Option[Long]): Source[(Long, String), NotUsed]
+
+  /** Highest known sequence for `topic`, used by callers that render an
+    * "initial seq" hint to a fresh client. Implementations should consult both
+    * any locally observed delivery and the underlying broker (e.g. JetStream
+    * `getLastMessage`) so a node that has not seen recent traffic still returns
+    * the global maximum. Returns `0L` when the topic has no messages yet, or
+    * when the implementation has no broker-level visibility. */
+  def latestSeq(topic: String): Long = 0L

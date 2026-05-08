@@ -10,7 +10,6 @@ import org.apache.pekko.stream.scaladsl.{Flow, Sink, Source}
 
 import java.time.Instant
 import java.util.UUID
-import java.util.concurrent.atomic.AtomicLong
 import scala.collection.concurrent.TrieMap
 
 /** Same demo as [[hotwire.ChatRoutes]], but built on a [[ReplayableBroadcastBus]].
@@ -33,8 +32,7 @@ final class ReplayChatRoutes(bus: ReplayableBroadcastBus):
   import ChatRoutes.ChatMessage
   import TwirlSupport.given
 
-  private val rooms      = TrieMap.empty[String, Vector[ChatMessage]]
-  private val latestSeqs = TrieMap.empty[String, AtomicLong]
+  private val rooms = TrieMap.empty[String, Vector[ChatMessage]]
 
   private def history(room: String): Vector[ChatMessage] =
     rooms.getOrElse(room, Vector.empty)
@@ -42,9 +40,6 @@ final class ReplayChatRoutes(bus: ReplayableBroadcastBus):
   private def append(room: String, msg: ChatMessage): Unit =
     rooms.updateWith(room)(prev => Some(prev.getOrElse(Vector.empty) :+ msg))
     ()
-
-  private def latestSeqFor(room: String): AtomicLong =
-    latestSeqs.getOrElseUpdate(room, new AtomicLong(0L))
 
   private def topicFor(room: String): String = s"jschat:$room"
 
@@ -58,7 +53,7 @@ final class ReplayChatRoutes(bus: ReplayableBroadcastBus):
                 extractRequest { req =>
                   val scheme = if req.uri.scheme == "https" then "wss" else "ws"
                   val wsUrl  = s"$scheme://${req.uri.authority}/jetstream-streams/chat/$room"
-                  val initial = latestSeqFor(room).get()
+                  val initial = bus.latestSeq(topicFor(room))
                   complete(views.html.jetstream.chat(history(room), csrf, room, wsUrl, initial))
                 }
               }
@@ -85,7 +80,6 @@ final class ReplayChatRoutes(bus: ReplayableBroadcastBus):
                       )
 
                       val seq     = bus.publishAndAck(topicFor(room), fragment)
-                      latestSeqFor(room).updateAndGet(prev => math.max(prev, seq))
                       val stamped = SeqStamping.stamp(fragment, seq)
 
                       import TurboStream.given
@@ -100,14 +94,17 @@ final class ReplayChatRoutes(bus: ReplayableBroadcastBus):
       },
       path("jetstream-streams" / "chat" / Segment) { room =>
         parameter("last_seq".as[Long].optional) { lastSeq =>
+          // Negative or otherwise-bogus values resolve to live tail rather than
+          // a JetStream subscribe failure. The bus also defends against this,
+          // but rejecting at the route boundary keeps the bus from spinning up
+          // an ephemeral consumer just to have it fail.
+          val sanitisedLastSeq = lastSeq.filter(_ >= 0L)
+
           val frames: Source[(Long, String), NotUsed] =
-            bus.subscribeFrom(topicFor(room), lastSeq)
+            bus.subscribeFrom(topicFor(room), sanitisedLastSeq)
 
           val outbound: Source[Message, NotUsed] =
-            frames.map { case (seq, html) =>
-              latestSeqFor(room).updateAndGet(prev => math.max(prev, seq))
-              TextMessage(SeqStamping.stamp(html, seq))
-            }
+            frames.map { case (seq, html) => TextMessage(SeqStamping.stamp(html, seq)) }
 
           val flow = Flow.fromSinkAndSourceCoupled(Sink.ignore, outbound)
           handleWebSocketMessages(flow)
@@ -130,10 +127,17 @@ object ReplayChatRoutes:
     private val needle = "<turbo-stream "
 
     def stamp(fragment: String, seq: Long): String =
-      if fragment.contains("data-seq=") then fragment
+      val idx = fragment.indexOf(needle)
+      if idx < 0 then fragment
       else
-        val idx = fragment.indexOf(needle)
-        if idx < 0 then fragment
+        val tagEnd = fragment.indexOf('>', idx + needle.length)
+        // Look for an existing data-seq= only inside the opening tag's attribute
+        // list. Checking the whole fragment would also match user-controlled
+        // content inside <template>…</template>, since Twirl HTML-escapes
+        // <, >, &, and quotes but not '=' or word characters.
+        val alreadyStamped =
+          tagEnd >= 0 && fragment.substring(idx, tagEnd).contains("data-seq=")
+        if alreadyStamped then fragment
         else
           val insertAt = idx + needle.length
           val (before, after) = fragment.splitAt(insertAt)
