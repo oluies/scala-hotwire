@@ -45,6 +45,9 @@ JSON schema to maintain, and no GraphQL gateway to debug. The server's only job 
 *render the right HTML at the right time*, and the bus in this project exists solely
 to fan that rendered HTML out to the right subscribers.
 
+For a broader curated list of Hotwire libraries, articles, and example apps across
+ecosystems, see [omarluq/awesome-hotwire](https://github.com/omarluq/awesome-hotwire).
+
 ## What's in here
 
 ```
