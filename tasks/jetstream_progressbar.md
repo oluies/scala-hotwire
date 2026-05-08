@@ -1,33 +1,53 @@
-# Plan: JetStream durable consumer + background-job progress bar
+# Plan: Background-job progress bar (with optional JetStream replay)
 
-Two changes that exercise the parts of the pub/sub façade the existing demos
-don't: **non-HTTP-driven publishers** (a worker pushing progress frames into the
-bus on its own clock) and **replay-on-reconnect** (a third `BroadcastBus`
-implementation backed by JetStream).
+> **Status note (2026-05-08).** This plan was originally drafted before
+> [PR #4 (`e0ed93b`)](https://github.com/oluies/scala-hotwire/pull/4) landed.
+> That PR shipped a JetStream-backed replay example under
+> `hotwire.examples.jetstream`, with a different design than the original
+> plan proposed (`ReplayableBroadcastBus` trait, per-tab seq tracking via
+> `?last_seq=N`, `DeliverPolicy.ByStartSequence`, browser as source of
+> truth — see `src/main/scala/hotwire/examples/jetstream/`).
+>
+> The plan below has been rewritten to match what shipped. The
+> "build a `JetStreamBroadcastBus`" PR has been removed (already done).
+> The progress-bar demo is split into:
+> - **PR #1** — progress bar on the existing `BroadcastBus` (in-process /
+>   core NATS). Standalone; no JetStream required.
+> - **PR #2** — replay-aware progress bar on `ReplayableBroadcastBus`,
+>   mirroring `ReplayChatRoutes`. Reuses the existing
+>   `<replaying-turbo-stream-source>` element and `SeqStamping` helper.
+> - **PR #3** — README documents both demos.
+
+The whole point of this work is to exercise the parts of the bus the existing
+demos don't: **non-HTTP-driven publishers** (a worker on the actor-system
+dispatcher pushing progress frames on its own clock) and, optionally,
+**reconnect replay** for a stream of frames the user can't easily reproduce
+(unlike chat, you can't just retype what you missed).
 
 References:
+- Existing replay example (read these first — this plan extends them):
+  - `src/main/scala/hotwire/examples/jetstream/ReplayableBroadcastBus.scala`
+  - `src/main/scala/hotwire/examples/jetstream/JetStreamBroadcastBus.scala`
+  - `src/main/scala/hotwire/examples/jetstream/ReplayChatRoutes.scala`
+  - `src/main/resources/public/jetstream/replay.js`
+  - `src/main/twirl/views/jetstream/chat.scala.html`
 - NATS JetStream concepts: <https://docs.nats.io/nats-concepts/jetstream>
-- jnats JetStream API (2.20.x): <https://github.com/nats-io/nats.java#jetstream>
-- Existing TODO marker: `README.md` under "What's deliberately not here".
 
-The two parts are independent. PR #1 (progress bar on in-process bus) ships
-first; PR #2 (`JetStreamBroadcastBus`) is purely additive; PR #3 documents the
-two together.
+PR #1 and PR #2 are independent; PR #1 ships value with zero new
+infrastructure, PR #2 layers on top of what PR #4 already wired up.
 
 ---
 
-## Part 1 — Background-job progress bar (PR #1)
+## Part 1 — Background-job progress bar on `BroadcastBus` (PR #1)
 
 ### Why first
 
 The existing demos are HTTP-driven publishers (chat POST → publish; posts has
-no bus at all). The bus trait is designed for *non-HTTP* publishers — cron
-jobs, queue consumers, Pekko Streams pipelines. A progress bar is the canonical
-demonstration: a `Source.tick` worker on the actor-system dispatcher publishes
-one Turbo Stream frame per tick. Zero new client-side JS.
-
-The progress bar works on every existing bus implementation; JetStream is what
-makes *reconnect replay* work, but the demo runs fine without it.
+no bus at all; replay-chat POST → publishAndAck). The bus trait is designed
+for *non-HTTP* publishers — cron jobs, queue consumers, Pekko Streams
+pipelines. A progress bar is the canonical demonstration: a `Source.tick`
+worker on the actor-system dispatcher publishes one Turbo Stream frame per
+tick. Zero new client-side JS.
 
 ### UX contract
 
@@ -179,19 +199,6 @@ object JobsRoutes:
     def done: Boolean = step >= total
 ```
 
-Notes on differences vs the old sketch:
-- `takeWhile(_ <= totalSteps, inclusive = true)` so the final tick (step ==
-  total) is the one that publishes `_progress_done`. The old sketch used
-  `.takeWhile(_ <= total)` which already includes total because of the `<=`,
-  but `inclusive = true` is the canonical Pekko API for "emit the boundary
-  element"; without it the test for the done frame is racy.
-- `runForeach(...)(using system)` — Pekko 1.1.x's `runForeach` needs an
-  implicit `Materializer`; the typed `ActorSystem` is one via the `Materializer`
-  given in `pekko-stream`. Already in scope in `ChatRoutes` because of the
-  `using system` constructor parameter.
-- `JobState` lives on the companion to keep the routes file readable, mirrors
-  `ChatRoutes.ChatMessage`.
-
 ### Twirl templates
 
 `src/main/twirl/views/_progress.scala.html`:
@@ -281,49 +288,37 @@ Notes on differences vs the old sketch:
 +        sys.error(s"Unknown DEMO=$other (expected one of: all, chat, posts, jobs)")
 ```
 
-```diff
-     val busOpt: Option[BroadcastBus] = demo match
--      case Demo.Posts => None
-+      case Demo.Posts => None
-       case _ =>
-         natsUrl match
-           ...
-```
-
-(`Demo.Jobs` falls through to the `case _` branch, so the bus is built. No
-other change required to the bus selector.)
+`Demo.Jobs` falls through the existing `case _ =>` branch in the bus
+selector, so it gets the same in-process / NatsBroadcastBus depending on
+`NATS_URL` — no change needed to that block.
 
 ```diff
--    val chatRoutes:  Option[Route] = busOpt.map(b => new ChatRoutes(b).routes)
--    val postsRoutes: Option[Route] = Option.when(demo != Demo.Chat)(new PostsRoutes().routes)
-+    val chatRoutes:  Option[Route] =
+-    val chatRoutes:   Option[Route] = busOpt.map(b => new ChatRoutes(b).routes)
+-    val replayRoutes: Option[Route] = replayBus.map(b => new ReplayChatRoutes(b).routes)
+-    val postsRoutes:  Option[Route] = Option.when(demo != Demo.Chat)(new PostsRoutes().routes)
++    val chatRoutes:   Option[Route] =
 +      Option.when(demo == Demo.All || demo == Demo.Chat)(busOpt).flatten
 +        .map(b => new ChatRoutes(b).routes)
-+    val postsRoutes: Option[Route] =
++    val replayRoutes: Option[Route] = replayBus.map(b => new ReplayChatRoutes(b).routes)
++    val postsRoutes:  Option[Route] =
 +      Option.when(demo == Demo.All || demo == Demo.Posts)(new PostsRoutes().routes)
-+    val jobsRoutes:  Option[Route] =
++    val jobsRoutes:   Option[Route] =
 +      Option.when(demo == Demo.All || demo == Demo.Jobs)(busOpt).flatten
 +        .map(b => new JobsRoutes(b).routes)
 
--    val landing = demo match
--      case Demo.Posts => "/posts"
--      case _          => "/chat/lobby"
-+    val landing = demo match
-+      case Demo.Posts => "/posts"
+     val landing = demo match
+       case Demo.Posts => "/posts"
 +      case Demo.Jobs  => "/jobs"
-+      case _          => "/chat/lobby"
+       case _          => "/chat/lobby"
 
      val mounted: Seq[Route] =
--      chatRoutes.toSeq ++ postsRoutes.toSeq ++ Seq(
-+      chatRoutes.toSeq ++ postsRoutes.toSeq ++ jobsRoutes.toSeq ++ Seq(
-         pathPrefix("public") { getFromResourceDirectory("public") },
-         pathSingleSlash { redirect(landing, StatusCodes.TemporaryRedirect) }
-       )
+-      chatRoutes.toSeq ++ replayRoutes.toSeq ++ postsRoutes.toSeq ++ Seq(
++      chatRoutes.toSeq ++ replayRoutes.toSeq ++ postsRoutes.toSeq ++ jobsRoutes.toSeq ++ Seq(
 ```
 
-Behaviour preserved: `DEMO=chat` no longer mounts posts (it didn't before
-either — the `demo != Chat` guard handled that); `DEMO=jobs` mounts only
-jobs and uses the bus; `DEMO=posts` still mounts no bus.
+Behaviour preserved: `DEMO=chat` mounts only chat (and replayChat when
+`NATS_JS_STREAM` is set); `DEMO=jobs` mounts only jobs and uses the bus;
+`DEMO=posts` still mounts no bus.
 
 ### Tests — `src/test/scala/hotwire/JobsRoutesSpec.scala`
 
@@ -382,7 +377,7 @@ class JobsRoutesSpec extends FunSuite:
     val req    = HttpRequest(HttpMethods.POST, "/jobs")
       .addHeader(Cookie("csrf_token" -> token))
       .withEntity(FormData("_csrf" -> token).toEntity)
-    val resp = Await.result(handler(r)(req), 5.seconds)
+    val resp = Await.result(handler(req), 5.seconds)
     assertEquals(resp.status, StatusCodes.SeeOther)
     val loc = resp.headers.collectFirst { case Location(uri) => uri.toString }
     assert(loc.exists(_.startsWith("/jobs/")), s"expected redirect to /jobs/<id>, got $loc")
@@ -400,400 +395,533 @@ class JobsRoutesSpec extends FunSuite:
 
     val frames = Await.result(collected, 5.seconds)
     assertEquals(frames.size, 6)
-    // Frames 1..4 are running progress; frame 5 (final) is _progress_done.
     assert(frames.take(5).forall(_.contains("""target="job-test-id-progress"""")))
     assert(frames(5).contains("Job test-id done"), frames(5))
     assert(!frames.head.contains("Back to jobs"))
   }
 ```
 
-The `take(6)` guard avoids a leaking subscriber if the worker over-emits.
-Same hot-subscribe race that `InProcessBroadcastBusSpec` solves with a
-sentinel exists here in principle, but the worker's first tick fires at
-`0.millis` and the `runWith(Sink.seq)` materialises before `start` is
-called, so the gap is tiny in practice; if CI flakes, port the
-`hotSubscribe` helper from `InProcessBroadcastBusSpec`.
-
 ### Validation steps
 
-1. `sbt compile` — expect clean compile of new files; no `-Wunused` warnings.
-2. `sbt test` — expect new `JobsRoutesSpec` to pass with 4 tests, no
-   regression in `ChatRoutesSpec` / `PostsRoutesSpec` / `InProcessBroadcastBusSpec` /
-   `TurboStreamSpec`.
-3. `DEMO=jobs sbt run`, then in two terminals:
-   - `curl -i http://localhost:8080/jobs` — expect `200 OK`,
+1. `sbt compile` — clean compile of new files; no `-Wunused` warnings.
+2. `sbt test` — new `JobsRoutesSpec` passes (4 tests); no regression in
+   `ChatRoutesSpec`, `PostsRoutesSpec`, `InProcessBroadcastBusSpec`,
+   `TurboStreamSpec`, `SeqStampingSpec`.
+3. `DEMO=jobs sbt run`, then:
+   - `curl -i http://localhost:8080/jobs` — `200 OK`,
      `Set-Cookie: csrf_token=…`, body contains `<form action="/jobs"`.
-   - `curl -i -b cookies.txt -c cookies.txt http://localhost:8080/jobs` then
-     `csrf=$(grep csrf_token cookies.txt | awk '{print $7}')` then
-     `curl -i -b cookies.txt -X POST -d "_csrf=$csrf" http://localhost:8080/jobs`
-     — expect `303 See Other` with `Location: /jobs/<8-char-id>`.
+   - `curl -c c.txt -b c.txt -i http://localhost:8080/jobs` then
+     `csrf=$(awk '/csrf_token/ {print $7}' c.txt)` then
+     `curl -b c.txt -i -X POST -d "_csrf=$csrf" http://localhost:8080/jobs`
+     — `303 See Other`, `Location: /jobs/<8-char-id>`.
 4. Browser: open `http://localhost:8080/jobs`, click "Start a job", land on
    `/jobs/<id>`, watch the `<progress>` bar tick from 0 to 100 over ~20s,
    final state replaced with "Job <id> done".
-5. Open `/jobs/<id>` in a second tab while job is running — both tabs tick
-   in lockstep (proves WS fan-out via the bus).
+5. Open `/jobs/<id>` in a second tab while the job is running — both tabs
+   tick in lockstep (proves WS fan-out via the bus).
 
 ### Done-when
 
 - [ ] All 4 new tests pass; full `sbt test` green.
 - [ ] `DEMO=jobs sbt run` lands on `/jobs`; `DEMO=all sbt run` mounts chat,
-      posts, and jobs simultaneously.
+      posts, jobs (and replay-chat when `NATS_JS_STREAM` is set).
 - [ ] Browser test 4 above completes without console errors.
 - [ ] Two-tab fan-out (test 5) shows synchronised ticks.
-- [ ] README "What's in here" table updated to list the third demo (separate
-      doc PR is fine).
+- [ ] README "What's in here" table updated to list the new demo (separate
+      doc PR is fine — see PR #3).
 
 ### Rollback plan
 
 PR #1 is fully additive at the source level except for the `Main.scala`
-diff. Rollback = `git revert <pr1-commit>`. The `Main.scala` change adds
-`Demo.Jobs` and an extra route option; reverting it restores the old
-two-demo selector verbatim. No DB migrations, no new dependencies, no
-config schema changes. `application.conf` is untouched.
+diff. Rollback = `git revert <pr1-commit>`. The `Main.scala` change only
+adds a `Demo.Jobs` case and an extra route option; reverting it restores
+the existing three-demo selector verbatim. No DB migrations, no new
+dependencies, no config schema changes. `application.conf` is untouched.
 
 ---
 
-## Part 2 — `JetStreamBroadcastBus` (PR #2)
+## Part 2 — Replay-aware progress bar on `ReplayableBroadcastBus` (PR #2)
 
 ### Why
 
-`NatsBroadcastBus` uses core NATS pub/sub: at-most-once, no server-side
-buffering. A WS that disconnects and reconnects 200ms later loses every
-frame published in the gap. For chat that's tolerable. For a job progress
-bar (PR #1) it's the difference between "bar resumes" and "bar stuck at
-47%". JetStream adds a per-stream persistent log; a *durable consumer* with
-a bounded start-time replays the last N seconds on resubscribe.
+Tab closes / network blips / lid sleep all kill the WS. On a chat that's
+tolerable. On a job whose only output is a stream of progress ticks, the
+user has no way to ask "what did I miss?" — the bar just freezes until the
+next tick. Mounting the same demo on the existing `ReplayableBroadcastBus`
+fixes that with no client-side state beyond what
+`<replaying-turbo-stream-source>` already tracks (`sessionStorage` per
+`data-room`).
 
-### Design decisions (settled)
+This PR mirrors `ReplayChatRoutes` line-for-line, with three small twists
+that the chat case glosses over because it uses a single shared subject
+prefix:
 
-1. **Per-subscribe durable consumer (one per topic, not per WS).** The bus
-   creates a single durable per `subscribe(topic)` call, then fans its
-   delivery out via a `BroadcastHub` to N HTTP/WS subscribers — exactly
-   mirroring `NatsBroadcastBus.buildHub`. One tab dying doesn't tear the
-   consumer down; only the last subscriber leaving does.
-2. **Replay horizon = 60s by default**, configurable on the constructor.
-   Use `DeliverPolicy.ByStartTime(now - replayHorizon)`. Avoids
-   `DeliverPolicy.All` (would replay all chat history on every reload).
-3. **Inactive consumer cleanup = 5 minutes via `inactiveThreshold`.** If
-   the JVM crashes between "subscriber gone" and our `deleteConsumer`
-   call, JetStream itself reaps the consumer after 5 min idle. 5 min is
-   chosen as ~50× the WS reconnect window (which we already cap at
-   `pekko.http.server.idle-timeout = 120s`); short enough that crash-loop
-   churn doesn't accumulate consumers, long enough that a genuinely-slow
-   reconnect inside the same materialised hub doesn't get reaped
-   prematurely.
-4. **Subject mapping = identical to `NatsBroadcastBus`.** No
-   `hotwire.` prefix. The `subjects` filter on the stream is `>` (catch-all)
-   so subjects already in use by `NatsBroadcastBus` (`chat.lobby`,
-   `job.<id>`) flow into the same stream when both implementations talk to
-   the same broker. Resolves the prefix-collision question: a node running
-   the JetStream impl and a node running the core impl against the same
-   broker *do* see each other's traffic, because the JetStream stream
-   captures the same subjects the core impl already publishes on. (Stream
-   capture is invisible to core publishers — they keep using
-   `connection.publish`.)
-5. **Storage = File**, configurable. Memory loses replay across broker
-   restarts; File on a local NATS dev box costs nothing. Demo expectations
-   align with "60s replay horizon survives a broker bounce".
-6. **`ensureStream` error handling — narrow.** Catch only the specific
-   "stream already exists" condition by checking `ApiErrorCode == 10058`.
-   The old sketch's blanket `case _: JetStreamApiException` would swallow
-   auth errors, unreachable broker, JetStream-not-enabled — replaced with
-   a precise check + rethrow on anything else.
+1. **Subject namespace.** Chat uses `jschat.>`. Jobs need their own
+   namespace (`jsjob.>`) so the catch-all consumer for chat doesn't ingest
+   job frames. This requires generalising
+   `JetStreamBroadcastBus.connectAndEnsureStream` to accept multiple
+   subject wildcards.
+2. **Replay key.** The `<replaying-turbo-stream-source>` element keys
+   `sessionStorage` by `data-room`. For jobs we pass the job id as
+   `data-room` — same JS, no change. The storage key is
+   `lastSeq:<id>`. Documented inline in the new template.
+3. **Stream limits.** The current default
+   (`maxMessagesPerSubject=1000, maxAge=24h`) is sized for chat. A 100-
+   step job at 200ms tick is 100 frames; jobs are much sparser per
+   subject, so the existing limits work fine. Keep defaults.
+
+### Decisions baked in
+
+- **Reuse the existing `CHAT_REPLAY` stream** by extending its subjects to
+  cover both `jschat.>` and `jsjob.>`. One stream, two subject namespaces.
+  Cheaper than running two streams, and the broker wildcard model handles
+  this directly.
+- **Reuse `replay.js` unchanged.** The element only knows about
+  `data-src` and `data-room`; we hand it a job id as `data-room`.
+- **Reuse `SeqStamping`.** It's package-private to
+  `hotwire.examples.jetstream` (object on `ReplayChatRoutes`'s companion).
+  Either move it to a top-level object or import it from the new route
+  file. We move it — see the diff.
+- **Mount under `/jetstream-jobs/<id>`** to mirror `/jetstream-chat/<room>`.
+  WS is `/jetstream-streams/jobs/<id>?last_seq=N`. Restrict `<id>` to the
+  same `[a-zA-Z0-9_-]+` regex used by `ReplayChatRoutes` for the
+  `*`/`>` wildcard hardening.
 
 ### Files to create / edit
 
 | Path | Action |
 | --- | --- |
-| `src/main/scala/hotwire/JetStreamBroadcastBus.scala` | new |
-| `src/main/scala/hotwire/Main.scala` | edit (third bus branch) |
-| `src/main/resources/application.conf` | edit (add `bus` key) |
+| `src/main/scala/hotwire/examples/jetstream/SeqStamping.scala` | new (extracted from `ReplayChatRoutes`) |
+| `src/main/scala/hotwire/examples/jetstream/ReplayChatRoutes.scala` | edit (drop the inline `SeqStamping` object, import from new file) |
+| `src/main/scala/hotwire/examples/jetstream/JetStreamBroadcastBus.scala` | edit (`connectAndEnsureStream` takes `subjectsWildcards: Seq[String]`) |
+| `src/main/scala/hotwire/examples/jetstream/ReplayJobsRoutes.scala` | new |
+| `src/main/twirl/views/jetstream/jobs.scala.html` | new |
+| `src/main/twirl/views/jetstream/job.scala.html` | new |
+| `src/main/scala/hotwire/Main.scala` | edit (mount `ReplayJobsRoutes`; pass both wildcards) |
+| `src/test/scala/hotwire/examples/jetstream/SeqStampingSpec.scala` | edit (update import path; tests unchanged) |
 
-`build.sbt`: jnats 2.20.5 already includes JetStream client classes
-(`io.nats.client.JetStream`, `io.nats.client.api.*`). No new dependency.
+### `SeqStamping` extraction
 
-### `src/main/scala/hotwire/JetStreamBroadcastBus.scala` (full file)
+**`src/main/scala/hotwire/examples/jetstream/SeqStamping.scala`** (new) —
+verbatim move of the existing `ReplayChatRoutes.SeqStamping` object body
+into its own top-level object so `ReplayJobsRoutes` can use it without an
+awkward import path:
 
 ```scala
-package hotwire
+package hotwire.examples.jetstream
 
-import io.nats.client.api.{
-  ConsumerConfiguration, DeliverPolicy, RetentionPolicy,
-  StorageType, StreamConfiguration
-}
-import io.nats.client.{
-  Connection, JetStream, JetStreamApiException, JetStreamSubscription,
-  PushSubscribeOptions
-}
+/** Inserts a `data-seq="N"` attribute on the *first* `<turbo-stream` element of an
+  * already-rendered fragment. The fragment is generated by
+  * [[hotwire.TurboStream]] so the structure is predictable: it always starts
+  * with the literal `<turbo-stream ` (note the trailing space).
+  *
+  * Idempotent: if a `data-seq="…"` is already present in the *opening tag's
+  * attribute list* it is left untouched. We deliberately do NOT scan the whole
+  * fragment for `data-seq=` because user-controlled content inside
+  * `<template>…</template>` could legitimately include the literal substring
+  * (Twirl HTML-escapes `<`, `>`, `&`, and quotes — but not `=` or word chars). */
+object SeqStamping:
+  private val needle = "<turbo-stream "
+
+  def stamp(fragment: String, seq: Long): String =
+    val idx = fragment.indexOf(needle)
+    if idx < 0 then fragment
+    else
+      val tagEnd = fragment.indexOf('>', idx + needle.length)
+      val alreadyStamped =
+        tagEnd >= 0 && fragment.substring(idx, tagEnd).contains("data-seq=")
+      if alreadyStamped then fragment
+      else
+        val insertAt = idx + needle.length
+        val (before, after) = fragment.splitAt(insertAt)
+        s"""${before}data-seq="$seq" $after"""
+```
+
+**`src/main/scala/hotwire/examples/jetstream/ReplayChatRoutes.scala`** —
+delete the inline `object SeqStamping` and update the import:
+
+```diff
+-import hotwire.examples.jetstream.ReplayChatRoutes.SeqStamping
++import hotwire.examples.jetstream.SeqStamping
+```
+
+```diff
+-object ReplayChatRoutes:
+-
+-  /** Inserts a `data-seq="N"` attribute … */
+-  object SeqStamping:
+-    private val needle = "<turbo-stream "
+-    def stamp(fragment: String, seq: Long): String = …
+```
+
+**`src/test/scala/hotwire/examples/jetstream/SeqStampingSpec.scala`** —
+update the import. All 5 existing tests stay; no new tests.
+
+```diff
+-import hotwire.examples.jetstream.ReplayChatRoutes.SeqStamping
++import hotwire.examples.jetstream.SeqStamping
+```
+
+### `JetStreamBroadcastBus.connectAndEnsureStream` — multi-subject
+
+**`src/main/scala/hotwire/examples/jetstream/JetStreamBroadcastBus.scala`**
+— extend the helper to accept multiple subject wildcards. Keep the
+single-string overload as a thin wrapper for source-compat:
+
+```diff
+-  def connectAndEnsureStream(
+-      url: String = Options.DEFAULT_URL,
+-      streamName: String = "CHAT_REPLAY",
+-      subjectsWildcard: String = "jschat.>",
++  def connectAndEnsureStream(
++      url: String = Options.DEFAULT_URL,
++      streamName: String = "CHAT_REPLAY",
++      subjectsWildcards: Seq[String] = Seq("jschat.>"),
+       maxMsgsPerSubject: Long = 1000L,
+       maxAge: Duration = Duration.ofHours(24)
+   ): Connection =
+     val connection = Nats.connect(url)
+     val jsm        = connection.jetStreamManagement()
+     val cfg = StreamConfiguration.builder()
+       .name(streamName)
+-      .subjects(subjectsWildcard)
++      .subjects(subjectsWildcards*)
+       .retentionPolicy(RetentionPolicy.Limits)
+       .maxMessagesPerSubject(maxMsgsPerSubject)
+       .maxAge(maxAge)
+       .storageType(StorageType.File)
+       .build()
+```
+
+(Single-subject callers can pass `Seq("foo.>")`. If any existing call site
+becomes awkward, add a `def connectAndEnsureStream(url, streamName,
+subjectsWildcard: String, …)` overload — but the only call site is
+`Main.scala`, which we update below.)
+
+**`StreamConfiguration.subjects(...)`** in jnats 2.20.5 takes varargs of
+`String` *or* a `Collection[String]`. Verify with:
+`javap -c io.nats.client.api.StreamConfiguration$Builder | grep subjects`.
+If only varargs: `.subjects(subjectsWildcards*)` is correct.
+
+### `ReplayJobsRoutes.scala` (full file)
+
+```scala
+package hotwire.examples.jetstream
+
+import hotwire.{CsrfSupport, TurboStream, TwirlSupport}
 import org.apache.pekko.NotUsed
 import org.apache.pekko.actor.typed.ActorSystem
-import org.apache.pekko.stream.OverflowStrategy
-import org.apache.pekko.stream.scaladsl.{BroadcastHub, Keep, Sink, Source, SourceQueueWithComplete}
+import org.apache.pekko.http.scaladsl.model.StatusCodes
+import org.apache.pekko.http.scaladsl.model.ws.{Message, TextMessage}
+import org.apache.pekko.http.scaladsl.server.Directives.*
+import org.apache.pekko.http.scaladsl.server.Route
+import org.apache.pekko.stream.scaladsl.{Flow, Sink, Source}
 
-import java.nio.charset.StandardCharsets
-import java.time.{Duration, ZonedDateTime}
-import java.util.concurrent.ConcurrentHashMap
-import java.util.function.{Function => JFunction}
-import scala.concurrent.Future
+import java.util.UUID
+import scala.collection.concurrent.TrieMap
+import scala.concurrent.duration.*
 
-/** JetStream-backed bus with bounded reconnect-replay window.
+/** Replay-aware variant of [[hotwire.JobsRoutes]], built on
+  * [[ReplayableBroadcastBus]]. Mirrors the structure of [[ReplayChatRoutes]]:
   *
-  * On startup ensures a stream named `streamName` capturing every subject
-  * matching `subjectFilter` exists. Each `subscribe(topic)` creates a
-  * uniquely-named durable consumer with `DeliverPolicy.ByStartTime(now -
-  * replayHorizon)`, fanned out to N application subscribers via a
-  * BroadcastHub (mirrors `NatsBroadcastBus` topology).
+  *   1. Every `<turbo-stream>` fragment carries a `data-seq` attribute
+  *      stamped from the JetStream sequence — see [[SeqStamping]].
   *
-  * Subject mapping matches `NatsBroadcastBus`: ':' and '/' → '.'. A core-NATS
-  * publisher on the same broker will land in this stream provided
-  * `subjectFilter` includes its subject (default '>' = catch-all).
-  */
-final class JetStreamBroadcastBus(
-    connection: Connection,
-    streamName: String = "hotwire",
-    subjectFilter: String = ">",
-    perTopicBufferSize: Int = 64,
-    replayHorizon: Duration = Duration.ofSeconds(60),
-    inactiveThreshold: Duration = Duration.ofMinutes(5),
-    storageType: StorageType = StorageType.File
-)(using system: ActorSystem[?])
-    extends BroadcastBus:
+  *   2. The page renders empty; the WebSocket replay (driven by the
+  *      `<replaying-turbo-stream-source>` element) is the single source of
+  *      truth for "what has this tab seen". A reconnecting tab passes
+  *      `?last_seq=N` and backfills only what was missed; a fresh tab
+  *      passes `?last_seq=0` and replays the entire retention window.
+  *
+  *   3. The job worker is a `Source.tick` materialised on the actor-system
+  *      dispatcher — non-HTTP publisher, the case the bus was designed for.
+  *      Each tick calls [[ReplayableBroadcastBus.publishAndAck]] so the
+  *      broker assigns and persists a sequence before the frame is
+  *      considered shipped.
+  *
+  * The `<id>` URL segment is restricted to `[a-zA-Z0-9_-]+` for the same
+  * reason as [[ReplayChatRoutes]]: NATS treats `*` and `>` as wildcards. */
+final class ReplayJobsRoutes(
+    bus: ReplayableBroadcastBus,
+    tickInterval: FiniteDuration = 200.millis,
+    defaultSteps: Int = 100
+)(using system: ActorSystem[?]):
 
   private given ec: scala.concurrent.ExecutionContext = system.executionContext
 
-  private val js: JetStream = connection.jetStream()
+  private val IdSegment = "[a-zA-Z0-9_-]+".r
 
-  private final case class Hub(
-      subscription: JetStreamSubscription,
-      durableName: String,
-      queue: SourceQueueWithComplete[String],
-      source: Source[String, NotUsed]
-  )
+  private def topicFor(id: String): String = s"jsjob:$id"
 
-  private val hubs = new ConcurrentHashMap[String, Hub]()
+  /** Tracks job ids we have started, so the listing page knows what exists. */
+  private val started = TrieMap.empty[String, Unit]
 
-  ensureStream()
-
-  private def topicToSubject(topic: String): String =
-    topic.replace(':', '.').replace('/', '.')
-
-  private def buildHub(topic: String): Hub =
-    val (queue, raw) =
-      Source.queue[String](perTopicBufferSize, OverflowStrategy.dropHead)
-        .toMat(BroadcastHub.sink[String](bufferSize = perTopicBufferSize))(Keep.both)
-        .run()
-    raw.runWith(Sink.ignore) // anchor
-
-    val subject  = topicToSubject(topic)
-    val durable  = s"hotwire-${subject.replace('.', '-')}-${java.util.UUID.randomUUID().toString.take(8)}"
-    val consumerCfg = ConsumerConfiguration.builder()
-      .durable(durable)
-      .deliverPolicy(DeliverPolicy.ByStartTime)
-      .startTime(ZonedDateTime.now().minus(replayHorizon))
-      .inactiveThreshold(inactiveThreshold)
-      .build()
-
-    val opts = PushSubscribeOptions.builder()
-      .stream(streamName)
-      .configuration(consumerCfg)
-      .build()
-
-    val dispatcher = connection.createDispatcher()
-    val sub = js.subscribe(
-      subject,
-      dispatcher,
-      msg => {
-        val payload = new String(msg.getData, StandardCharsets.UTF_8)
-        queue.offer(payload)
-        msg.ack()
-        ()
+  val routes: Route =
+    concat(
+      pathPrefix("jetstream-jobs") {
+        concat(
+          pathEndOrSingleSlash {
+            concat(
+              get {
+                CsrfSupport.withCsrfToken { csrf =>
+                  complete(views.html.jetstream.jobs(started.keys.toVector.sorted, csrf))
+                }
+              },
+              post {
+                CsrfSupport.withCsrfToken { csrf =>
+                  CsrfSupport.requireCsrf(csrf) {
+                    val id = UUID.randomUUID().toString.take(8)
+                    started.update(id, ())
+                    start(id, defaultSteps)
+                    redirect(s"/jetstream-jobs/$id", StatusCodes.SeeOther)
+                  }
+                }
+              }
+            )
+          },
+          path(IdSegment) { id =>
+            get {
+              CsrfSupport.withCsrfToken { csrf =>
+                extractRequest { req =>
+                  val scheme = if req.uri.scheme == "https" then "wss" else "ws"
+                  val wsUrl  = s"$scheme://${req.uri.authority}/jetstream-streams/jobs/$id"
+                  complete(views.html.jetstream.job(csrf, id, wsUrl))
+                }
+              }
+            }
+          }
+        )
       },
-      /* autoAck = */ false,
-      opts
+      path("jetstream-streams" / "jobs" / IdSegment) { id =>
+        parameter("last_seq".as[Long].optional) { lastSeq =>
+          val sanitisedLastSeq = lastSeq.filter(_ >= 0L)
+          val frames: Source[(Long, String), NotUsed] =
+            bus.subscribeFrom(topicFor(id), sanitisedLastSeq)
+          val outbound: Source[Message, NotUsed] =
+            frames.map { case (seq, html) => TextMessage(SeqStamping.stamp(html, seq)) }
+          val flow = Flow.fromSinkAndSourceCoupled(Sink.ignore, outbound)
+          handleWebSocketMessages(flow)
+        }
+      }
     )
 
-    Hub(sub, durable, queue, raw)
-
-  private val builder: JFunction[String, Hub] =
-    (t: String) => buildHub(t)
-
-  private def hubFor(topic: String): Hub =
-    hubs.computeIfAbsent(topic, builder)
-
-  override def publish(topic: String, html: String): Unit =
-    // Core-publish is fine: the stream's subject filter captures it.
-    // Avoids the JetStream publish ack round-trip on the hot path.
-    connection.publish(topicToSubject(topic), html.getBytes(StandardCharsets.UTF_8))
-
-  override def subscribe(topic: String): Source[String, NotUsed] =
-    hubFor(topic).source
-
-  override def shutdown(): Future[Unit] = Future {
-    hubs.values().forEach { h =>
-      try h.subscription.unsubscribe() catch case _: Throwable => ()
-      try connection.jetStreamManagement().deleteConsumer(streamName, h.durableName)
-      catch case _: Throwable => () // best-effort; inactiveThreshold reaps anyway
-      h.queue.complete()
-    }
-    try connection.flush(Duration.ofSeconds(2))
-    catch case _: Throwable => ()
-    connection.close()
-  }
-
-  /** Idempotent stream creation. Catches *only* the "stream name already in
-    * use" API error (10058 in nats-server >= 2.10), reconciles by calling
-    * `updateStream`. Other JetStreamApiExceptions (auth, no JetStream
-    * enabled, etc.) propagate. */
-  private def ensureStream(): Unit =
-    val mgr = connection.jetStreamManagement()
-    val cfg = StreamConfiguration.builder()
-      .name(streamName)
-      .subjects(subjectFilter)
-      .retentionPolicy(RetentionPolicy.Limits)
-      .storageType(storageType)
-      .maxAge(replayHorizon.multipliedBy(10)) // headroom for late reconnects
-      .build()
-    try
-      mgr.addStream(cfg)
-      ()
-    catch
-      case e: JetStreamApiException if e.getApiErrorCode == 10058 =>
-        // Stream already exists — reconcile config in case subjects/maxAge changed.
-        mgr.updateStream(cfg)
+  /** Worker: same tick shape as [[hotwire.JobsRoutes.start]], but uses
+    * `publishAndAck` so the broker-assigned seq stamps every frame. */
+  private[jetstream] def start(id: String, totalSteps: Int): Unit =
+    Source.tick(0.millis, tickInterval, ())
+      .scan(0)((n, _) => n + 1)
+      .takeWhile(_ <= totalSteps, inclusive = true)
+      .runForeach { step =>
+        val rawFrag =
+          if step < totalSteps then
+            TurboStream.stream(
+              TurboStream.Action.Update,
+              s"job-$id-progress",
+              views.html._progress(id, step, totalSteps)
+            )
+          else
+            TurboStream.stream(
+              TurboStream.Action.Update,
+              s"job-$id-progress",
+              views.html._progress_done(id)
+            )
+        // publishAndAck blocks for the broker ack, so the seq is in hand
+        // before the next tick fires. Out-of-order delivery cannot happen
+        // because there is one publisher per job and tick is serial.
+        bus.publishAndAck(topicFor(id), rawFrag)
         ()
-      // Any other JetStreamApiException (e.g. JS not enabled, unauthorised)
-      // propagates out of the constructor and aborts startup.
+      }(using system)
+    ()
 ```
 
-Notes:
-- API error code `10058` is the documented "stream name already in use" code
-  in nats-server. If the broker reports a different code (older versions),
-  the constructor will fail with a clear `JetStreamApiException` instead of
-  silently swallowing it — fail-fast beats lying.
-- `connection.publish` rather than `js.publish` on the hot path: skips the
-  ack round-trip. Core publishes are still captured by JetStream because
-  the stream subscribes to the subject. Documented in the class doc.
-- `inactiveThreshold(Duration.ofMinutes(5))` requires jnats ≥ 2.16; 2.20.5
-  is fine.
+Note: `_progress.scala.html` and `_progress_done.scala.html` from PR #1 are
+reused as-is. If PR #2 ships before PR #1, copy those two templates first.
 
-### `Main.scala` selector — diff
+### Twirl templates
+
+**`src/main/twirl/views/jetstream/jobs.scala.html`** — listing page.
+
+```html
+@(items: Seq[String], csrfToken: String)
+@views.html.layout("Replay jobs", csrfToken) {
+  <header>
+    <h1>JetStream replay jobs</h1>
+    <p class="hint">
+      Same shape as <a href="/jobs">/jobs</a>, but progress frames are persisted in
+      JetStream. Open a job, disable the network, re-enable: the bar resumes from where
+      it would have been, not where it was when the WS dropped.
+    </p>
+  </header>
+
+  <form action="/jetstream-jobs" method="post" class="compose">
+    <input type="hidden" name="_csrf" value="@csrfToken">
+    <button type="submit">Start a job</button>
+  </form>
+
+  <ul class="jobs">
+    @for(id <- items) {
+      <li><a href="/jetstream-jobs/@id">Job @id</a></li>
+    }
+    @if(items.isEmpty) {
+      <li class="hint">No jobs yet — start one above.</li>
+    }
+  </ul>
+}
+```
+
+**`src/main/twirl/views/jetstream/job.scala.html`** — single-job page.
+Renders empty; the broker drives the rest, exactly as
+`jetstream/chat.scala.html` does.
+
+```html
+@(csrfToken: String, id: String, wsUrl: String)
+@views.html.layout("Replay job: " + id, csrfToken) {
+  <header>
+    <h1>JetStream replay job — @id</h1>
+    <p class="hint">
+      Open in two tabs. Disable network on one, watch the other tick to ~30%, then
+      re-enable: the offline tab backfills via JetStream and catches up. The page
+      intentionally renders empty on first load — every frame arrives via the
+      WebSocket, so the broker is the single source of truth.
+    </p>
+  </header>
+
+  <replaying-turbo-stream-source
+    data-src="@wsUrl"
+    data-room="@id"></replaying-turbo-stream-source>
+
+  <div id="job-@(id)-progress" class="job-progress"></div>
+
+  <p><a href="/jetstream-jobs">All replay jobs</a></p>
+
+  <script type="module" src="/public/jetstream/replay.js"></script>
+}
+```
+
+### `Main.scala` — wire `ReplayJobsRoutes`
 
 ```diff
--    val busOpt: Option[BroadcastBus] = demo match
--      case Demo.Posts => None
--      case _ =>
--        natsUrl match
--          case Some(url) =>
--            log.info(s"Connecting to NATS at $url")
--            Some(new NatsBroadcastBus(NatsBroadcastBus.connect(url)))
--          case None =>
--            log.info("Using in-process broadcast bus (set NATS_URL to use NATS)")
--            Some(new InProcessBroadcastBus())
-+    val bus = Try(cfg.getString("bus")).toOption.map(_.trim.toLowerCase).filter(_.nonEmpty)
-+    val busOpt: Option[BroadcastBus] = demo match
-+      case Demo.Posts => None
-+      case _ =>
-+        natsUrl match
-+          case Some(url) if bus.contains("jetstream") =>
-+            log.info(s"Connecting to NATS JetStream at $url")
-+            Some(new JetStreamBroadcastBus(NatsBroadcastBus.connect(url)))
-+          case Some(url) =>
-+            log.info(s"Connecting to NATS (core) at $url")
-+            Some(new NatsBroadcastBus(NatsBroadcastBus.connect(url)))
-+          case None =>
-+            log.info("Using in-process broadcast bus (set NATS_URL to use NATS)")
-+            Some(new InProcessBroadcastBus())
+     val replayBus: Option[ReplayableBroadcastBus] =
+       (demo, natsUrl, jsStreamName) match
+         case (Demo.Posts, _, _)              => None
+         case (_, Some(url), Some(name)) =>
+           log.info(s"Connecting JetStream replay bus at $url (stream=$name)")
+           Some(
+             new JetStreamBroadcastBus(
+-              JetStreamBroadcastBus.connectAndEnsureStream(url, streamName = name, subjectsWildcard = "jschat.>"),
++              JetStreamBroadcastBus.connectAndEnsureStream(
++                url,
++                streamName       = name,
++                subjectsWildcards = Seq("jschat.>", "jsjob.>")
++              ),
+               streamName = name
+             )
+           )
+         case _ => None
+
+     val chatRoutes:    Option[Route] = …
+-    val replayRoutes:  Option[Route] = replayBus.map(b => new ReplayChatRoutes(b).routes)
++    val replayRoutes:  Option[Route] = replayBus.map(b => new ReplayChatRoutes(b).routes)
++    val replayJobsRoutes: Option[Route] =
++      replayBus
++        .filter(_ => demo == Demo.All || demo == Demo.Jobs || demo == Demo.Chat)
++        .map(b => new ReplayJobsRoutes(b).routes)
+     val postsRoutes:   Option[Route] = …
+     val jobsRoutes:    Option[Route] = …
 ```
 
-### `application.conf` — diff
+(The `filter` mirrors how `ReplayChatRoutes` is gated implicitly by
+`replayBus`. Replay-jobs reuses the same bus, so it ships whenever the bus
+is up *and* the demo selector includes jobs or chat. If you'd rather
+always-on, drop the `.filter` — the route just sits there inert if no
+client opens it.)
 
 ```diff
-   # Leave unset to use the in-process bus. Set to e.g. "nats://localhost:4222" to use NATS.
-   nats-url = ${?NATS_URL}
-
-+  # When NATS_URL is set, picks the NATS bus implementation. One of:
-+  #   core       — at-most-once core NATS pub/sub (default).
-+  #   jetstream  — JetStream durable consumer with 60s replay-on-reconnect.
-+  bus = ${?BUS}
-+
-   # Which demo(s) to mount. One of: all, chat, posts. Default: all.
+     val mounted: Seq[Route] =
+-      chatRoutes.toSeq ++ replayRoutes.toSeq ++ postsRoutes.toSeq ++ jobsRoutes.toSeq ++ Seq(
++      chatRoutes.toSeq ++ replayRoutes.toSeq ++ replayJobsRoutes.toSeq ++ postsRoutes.toSeq ++ jobsRoutes.toSeq ++ Seq(
 ```
 
-### Tests — committed approach: manual verification only
+The startup banner already mentions the chat replay; extend it for jobs:
 
-JetStream needs a real broker. We do **not** add it to CI. We do not add
-testcontainers either: the only thing it would buy us is automated
-verification that "stream is created idempotently and one consumer
-delivers replay" — which is JetStream's own contract, exhaustively tested
-upstream. The cost (a Docker dependency in CI, ~5s startup per test class,
-flake surface area) outweighs the benefit for a thin adapter.
+```diff
+-        val replayHint = if replayBus.isDefined then "  →  /jetstream-chat/lobby for replay demo" else ""
++        val replayHint =
++          if replayBus.isDefined then "  →  /jetstream-chat/lobby (chat) and /jetstream-jobs (jobs) for replay demos"
++          else ""
+```
 
-Manual recipe (also goes into README in PR #3):
+### Tests
 
-1. Start a JetStream-enabled broker:
-   ```bash
-   nats-server -js --store_dir /tmp/jshotwire
+JetStream needs a real broker — no automated test in CI, mirroring
+`ReplayChatRoutes`. The existing `SeqStampingSpec` tests already cover the
+seq-stamping idempotence and the user-content-collision case. No new test
+files needed for PR #2; the `Main.scala` wiring is structural.
+
+**Manual recipe** (run after PR #1 has shipped so the templates exist):
+
+1. `nats-server -js --store_dir /tmp/jshotwire`
+2. ```
+   NATS_URL=nats://localhost:4222 \
+   NATS_JS_STREAM=CHAT_REPLAY \
+   DEMO=all sbt run
    ```
-2. Run the app:
-   ```bash
-   NATS_URL=nats://localhost:4222 BUS=jetstream DEMO=all sbt run
-   ```
-3. **Stream-creation check.** In another terminal:
-   ```bash
-   nats stream ls   # nats CLI; brew install nats-io/nats-tools/nats
-   ```
-   Expect a stream named `hotwire`, subjects `>`, storage `File`.
-4. **Replay check (chat).** Open `/chat/lobby`, send a message, close the
-   tab. Wait 5s. Reopen. Expect the message redelivered as a Turbo Stream
-   frame within 1s (within the 60s replay horizon).
-5. **Replay check (jobs).** Start a job at `/jobs`. Close the tab at ~30%.
-   Wait 10s. Reopen the job page. Expect the bar to jump to whatever the
-   current step is and continue ticking — no stuck 30% bar.
-6. **Cleanup check.** Close all tabs. Wait 6 minutes. `nats consumer ls hotwire`
-   should show zero `hotwire-…` consumers (the `inactiveThreshold` reaped
-   them; if the JVM exited cleanly they're already gone).
+3. **Stream check.** `nats stream info CHAT_REPLAY` — expect
+   `Subjects: jschat.>, jsjob.>`.
+4. **Backfill check (jobs).** Browser tab A: open
+   `http://localhost:8080/jetstream-jobs`, click "Start a job". Wait until
+   the bar reaches ~20%. Open DevTools → Network → throttle "Offline" for
+   ~5 seconds. Re-enable. The bar should jump to current step, not stay
+   stuck at 20%, and continue ticking.
+5. **Cross-tab check.** Open the same job URL in tab B (a *new* tab — not
+   a copy of tab A). It should backfill the entire job history (because
+   `sessionStorage` for the new tab starts at `lastSeq=0`).
+6. **Subject isolation.** Post a chat message at `/jetstream-chat/lobby`,
+   then `nats stream view CHAT_REPLAY --filter jsjob.>` should show only
+   job frames, no chat frames; reverse with `--filter jschat.>`.
 
 ### Validation steps
 
-1. `sbt compile` — clean compile; the new file pulls in JetStream API only,
-   no new dependencies needed.
-2. `sbt test` — no regressions; no new tests added in this PR.
-3. `sbt run` (no env vars) — still uses in-process bus; chat + posts +
-   jobs all work as in PR #1.
-4. `NATS_URL=nats://localhost:4222 sbt run` — uses *core* bus (default
-   `BUS` unset); behaviour identical to today.
-5. `NATS_URL=nats://localhost:4222 BUS=jetstream sbt run` — uses
-   JetStream bus; perform the manual replay recipe above.
-6. `NATS_URL=nats://localhost:4222 BUS=jetstream sbt run` against a broker
-   *without* `-js` — expect a fast crash on startup with a
-   `JetStreamApiException` from `addStream`. Confirms `ensureStream`
-   doesn't swallow real errors.
+1. `sbt compile` — clean.
+2. `sbt test` — `SeqStampingSpec` passes with the new import path; nothing
+   else changes.
+3. `sbt run` (no env vars) — replay routes are absent (just like today);
+   chat + posts + jobs from PR #1 work.
+4. `NATS_URL=nats://localhost:4222 NATS_JS_STREAM=CHAT_REPLAY sbt run`
+   against `nats-server -js` — `/jetstream-chat/lobby` and
+   `/jetstream-jobs` both mount; manual recipe steps 4–6 succeed.
+5. Existing chat-replay flow unchanged: send a message at
+   `/jetstream-chat/lobby` from one tab, reload another tab, see the
+   message backfill. (Regression check that the multi-subject stream
+   change didn't break the existing demo.)
 
 ### Done-when
 
-- [ ] `JetStreamBroadcastBus.scala` compiles, no `-Wunused` warnings.
-- [ ] Default boot (no `NATS_URL`) and `BUS=core` boot are byte-identical
-      in observable behaviour to before PR #2.
-- [ ] Manual replay recipe steps 4 and 5 succeed.
-- [ ] Step 6 (broker without `-js`) fails fast with a clear log line.
-- [ ] `inactiveThreshold` value (5m) is documented in the class scaladoc
-      *and* in `application.conf` comment.
+- [ ] `SeqStamping` lives at top level under `hotwire.examples.jetstream`;
+      `ReplayChatRoutes` imports it; `SeqStampingSpec` passes with the new
+      import.
+- [ ] `connectAndEnsureStream` accepts `subjectsWildcards: Seq[String]`;
+      `Main.scala` passes `Seq("jschat.>", "jsjob.>")`.
+- [ ] `ReplayJobsRoutes` mounts under `/jetstream-jobs/<id>`; WS at
+      `/jetstream-streams/jobs/<id>?last_seq=N`.
+- [ ] Manual recipe steps 4–6 succeed in Chrome (and Firefox if reachable).
+- [ ] Existing chat-replay regression check (validation step 5) passes.
 
 ### Rollback plan
 
-- Code: pure addition. `git revert <pr2-commit>` removes
-  `JetStreamBroadcastBus.scala`, the `bus =` line in `application.conf`,
-  and reverts the `Main.scala` selector. Existing core-NATS and in-process
-  paths are unchanged by PR #2's diff (only an additional branch was
-  added), so nothing is at risk.
-- Operational: if a deployment runs `BUS=jetstream` and we revert, drop
-  the env var or set `BUS=core`. The on-broker stream named `hotwire`
-  is harmless to leave behind; delete with `nats stream rm hotwire` if
-  desired.
+- `git revert <pr2-commit>` removes `ReplayJobsRoutes`, the new templates,
+  the multi-subject helper change, and the `SeqStamping` extraction.
+- The on-broker stream named `CHAT_REPLAY` keeps its extended subject list
+  after revert; this is harmless (no publisher remains for `jsjob.>` so
+  nothing accumulates). Optionally narrow it: `nats stream edit
+  CHAT_REPLAY --subjects 'jschat.>'`.
+- If only the multi-subject helper is wrong: leave the keep `Seq` overload,
+  but switch `Main.scala` back to `Seq("jschat.>")` — `ReplayJobsRoutes`
+  will just see no traffic.
 
 ---
 
-## Part 3 — README replay recipe (PR #3)
+## Part 3 — README updates (PR #3)
 
 ### Scope
 
@@ -805,80 +933,50 @@ Documentation only. No code, no config.
 | --- | --- |
 | `README.md` | edit |
 
-### `README.md` — diff
+### Changes
 
-In the "What's deliberately not here" list, drop the JetStream bullet
-(it's now implemented):
+1. **"What's in here" table** — add `/jobs` (PR #1) and, if PR #2 has
+   shipped, `/jetstream-jobs` to the list of demos.
 
-```diff
--* **JetStream durable consumers.** Add a `JetStreamBroadcastBus` implementation when
--  you need replay-on-reconnect. The trait stays the same.
-```
+2. **New section "Switching to JetStream replay (jobs)"** — point at the
+   existing `Switching to NATS JetStream` chat recipe and document the
+   jobs equivalent:
 
-In the "When to use which" table, mark JetStream as available:
+   ```markdown
+   ### Verifying replay survives a network blip
 
-```diff
--| Need WS-reconnect replay of missed frames      | NATS + JetStream¹     |
--
--¹ Out of scope for this demo — see `NatsBroadcastBus.scala` for where you'd swap the
--core dispatcher for a `JetStreamSubscription` with a durable consumer.
-+| Need WS-reconnect replay of missed frames      | NATS + JetStream      |
-```
+   Run a JetStream-enabled broker and start the app:
 
-After the "Switching to NATS" section, add:
+   ```bash
+   nats-server -js --store_dir /tmp/jshotwire
+   NATS_URL=nats://localhost:4222 \
+   NATS_JS_STREAM=CHAT_REPLAY \
+   sbt run
+   ```
 
-````markdown
-### Switching to NATS JetStream (replay on reconnect)
+   Open <http://localhost:8080/jetstream-jobs>, click "Start a job", and
+   watch the bar tick. Around 20% open DevTools → Network → throttle
+   "Offline" for a few seconds. Re-enable. The bar jumps to its current
+   step rather than staying stuck — the broker held the missed frames,
+   the `<replaying-turbo-stream-source>` element reconnected with
+   `?last_seq=N`, and the JetStream consumer replayed them in order.
+   ```
 
-Core NATS is at-most-once: a WS that drops and reconnects 200ms later loses
-every Turbo Stream frame published in the gap. JetStream adds a per-stream
-log on the broker; `JetStreamBroadcastBus` creates a durable consumer per
-topic with a 60-second replay horizon, so a reconnecting tab catches up.
-
-Run a JetStream-enabled broker:
-
-```bash
-nats-server -js --store_dir /tmp/jshotwire
-```
-
-Run the app:
-
-```bash
-NATS_URL=nats://localhost:4222 BUS=jetstream sbt run
-```
-
-To verify replay end-to-end against the jobs demo:
-
-1. Start a job at <http://localhost:8080/jobs>.
-2. Close the tab when the bar reaches ~30%.
-3. Wait 10 seconds.
-4. Reopen the job page. Expect the bar to jump to its current step and
-   keep ticking — not freeze at 30%.
-
-Configurable knobs (constructor params on `JetStreamBroadcastBus`):
-
-| Param | Default | Notes |
-| --- | --- | --- |
-| `streamName` | `"hotwire"` | shared with core-NATS publishers on the same broker (catch-all subject filter) |
-| `subjectFilter` | `">"` | broaden/narrow what the stream captures |
-| `replayHorizon` | `60s` | how far back a reconnecting subscriber sees |
-| `inactiveThreshold` | `5m` | server-side reaper for orphaned consumers |
-| `storageType` | `File` | switch to `Memory` for ephemeral demos |
-````
+3. **"What's deliberately not here"** — drop or edit the JetStream bullet
+   to reflect that JetStream is now in `hotwire.examples.jetstream` (PR #4
+   already covered chat; this plan adds jobs).
 
 ### Validation steps
 
-1. `markdownlint README.md` (or visual inspection) — no broken anchors,
-   tables render.
-2. Manually walk the new "Switching to NATS JetStream" section on a clean
-   machine — every command runs as written.
+1. Visual inspection of the rendered README on GitHub (or `glow README.md`).
+2. Manually walk the new "Verifying replay" recipe on a clean machine.
 
 ### Done-when
 
-- [ ] README's "What's deliberately not here" no longer claims JetStream is missing.
-- [ ] New "Switching to NATS JetStream" section between "Switching to NATS"
-      and "Tests".
-- [ ] Replay recipe works copy-paste against a fresh `nats-server -js`.
+- [ ] README's "What's in here" lists the new demo(s).
+- [ ] New replay recipe section under the existing "Switching to NATS
+      JetStream" content.
+- [ ] All commands in the recipe run as written against a fresh broker.
 
 ### Rollback plan
 
@@ -888,13 +986,16 @@ Configurable knobs (constructor params on `JetStreamBroadcastBus`):
 
 ## Rollout order
 
-1. **PR #1 — Background-job progress bar on existing buses.** Smallest
-   viable demo; no NATS dependency; fully testable in CI. Ships value
-   immediately.
-2. **PR #2 — `JetStreamBroadcastBus`.** Pure addition; selectable via
-   `BUS=jetstream`. Default behaviour unchanged. Manual verification only.
-3. **PR #3 — README replay recipe.** Documentation that ties #1 and #2
-   together with a reproducible "watch a job survive a reconnect" walkthrough.
+1. **PR #1 — Background-job progress bar on `BroadcastBus`.** No NATS
+   dependency, fully testable in CI, ships value immediately. Independent
+   of PR #4.
+2. **PR #2 — Replay-aware progress bar on `ReplayableBroadcastBus`.**
+   Depends on PR #1's templates (`_progress`, `_progress_done`) and
+   PR #4's existing `ReplayableBroadcastBus` / `replay.js` /
+   `JetStreamBroadcastBus`. Pure addition; default behaviour
+   (without `NATS_JS_STREAM`) unchanged.
+3. **PR #3 — README updates.** Depends on PRs #1 and #2.
 
-PR #1 and PR #2 are independent and can land in either order; PR #3 lands
-after both.
+PR #1 can land before PR #2 with no extra coordination. If PR #2 lands
+without PR #1, the templates `_progress.scala.html` and
+`_progress_done.scala.html` need to be lifted into PR #2 itself.
