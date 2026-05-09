@@ -2,7 +2,7 @@ ThisBuild / scalaVersion := "3.3.4"
 ThisBuild / organization := "se.olund.hotwire"
 ThisBuild / version      := "0.1.0-SNAPSHOT"
 
-val pekkoV     = "1.1.3"
+val pekkoV     = "1.1.5"
 val pekkoHttpV = "1.1.0"
 val jnatsV     = "2.20.5"
 val munitV     = "1.0.3"
