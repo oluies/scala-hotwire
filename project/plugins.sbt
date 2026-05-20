@@ -1,1 +1,1 @@
-addSbtPlugin("org.playframework.twirl" % "sbt-twirl" % "2.0.7")
+addSbtPlugin("org.playframework.twirl" % "sbt-twirl" % "2.0.9")
