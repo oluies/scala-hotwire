@@ -18,7 +18,11 @@ class JobsRoutesSpec extends FunSuite:
   given system: ActorSystem[Nothing] =
     ActorSystem(Behaviors.empty, "JobsRoutesSpec")
 
-  override def afterAll(): Unit = system.terminate()
+  // Await termination: typed `terminate()` returns Unit, so without this the suite
+  // outlives the system and its threads die on NoClassDefFoundError at teardown.
+  override def afterAll(): Unit =
+    system.terminate()
+    Await.result(system.whenTerminated, 30.seconds)
 
   private def newRoutes(steps: Int = 5): (BroadcastBus, JobsRoutes) =
     val bus = new InProcessBroadcastBus()
