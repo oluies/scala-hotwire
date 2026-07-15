@@ -17,7 +17,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        java: ['21', '25']
+        java: ['21', '25', '26']
     steps:
       - uses: actions/checkout@v6
 
@@ -42,10 +42,14 @@ jobs:
             ${{ runner.os }}-sbt-${{ matrix.java }}-
             ${{ runner.os }}-sbt-
 
-      - name: Compile
-        run: sbt -batch -no-colors "Test / compile"
-
-      - name: Test
-        # testFull, not test: under sbt 2 `test` has testQuick semantics and
-        # exits 0 without running anything when caches are warm.
-        run: sbt -batch -no-colors testFull
+      # One sbt invocation, not two. sbt 2's client starts a background server
+      # and leaves it running; a second `sbt` step attaches to it as a thin
+      # client and intermittently dies in <1s with no output at all. That race
+      # hit JDK 25 on #33 and JDK 21 on #34 -- it follows whichever job loses,
+      # not a JDK version. Keeping both commands in one process removes the
+      # cross-step handoff entirely.
+      #
+      # testFull, not test: under sbt 2 `test` has testQuick semantics and
+      # exits 0 without running anything when caches are warm.
+      - name: Compile and test
+        run: sbt -batch -no-colors "Test/compile; testFull"
