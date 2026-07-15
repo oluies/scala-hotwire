@@ -220,16 +220,25 @@ NATS_URL=nats://localhost:4222 sbt run
 
 #### Or run the broker in a container
 
-`scripts/dev-nats.sh` does the same thing with [Apple's `container`](https://github.com/apple/container)
+`scripts/dev-nats.scala` does the same thing with [Apple's `container`](https://github.com/apple/container)
 runtime, so you don't install a broker on the host. Only the broker is
 containerised — the app still runs via `sbt run`. JetStream is enabled, which
 the [replay demo](#advanced-example-jetstream-with-reconnect-replay) needs.
 
+It's a [Mill script](https://mill-build.org/mill/scalalib/script.html) — a single
+`.scala` file, no build definition — so needs `mill` on your PATH (`brew install mill`):
+
 ```bash
-./scripts/dev-nats.sh up       # start broker (idempotent)
-./scripts/dev-nats.sh status   # is it up, and is JetStream on?
-./scripts/dev-nats.sh run      # up, then `sbt run` wired to it
-./scripts/dev-nats.sh down     # stop and remove
+mill scripts/dev-nats.scala up       # start broker (idempotent)
+mill scripts/dev-nats.scala status   # is it up, and is JetStream on?
+mill scripts/dev-nats.scala run      # up, then `sbt run` wired to it
+mill scripts/dev-nats.scala down     # stop and remove
+```
+
+For the two-node fan-out demo, `run` takes a port:
+
+```bash
+mill scripts/dev-nats.scala run --port 8081
 ```
 
 `container` publishes the port to the host, so the broker lands on
