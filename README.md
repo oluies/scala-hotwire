@@ -151,7 +151,8 @@ swap is a one-line change in `Main.scala`. Application code never sees NATS.
 
 ## Running
 
-Prerequisites: JDK 17+ and sbt 1.10+.
+Prerequisites: JDK 21+ and any recent sbt launcher — `project/build.properties`
+pins sbt 2.0.2, which the launcher fetches for you. CI builds on JDK 21 and 25.
 
 ```bash
 sbt run
@@ -313,8 +314,14 @@ log you'd switch to subject-keyed Key-Value or a real DB; for ephemeral
 ## Tests
 
 ```bash
-sbt test
+sbt testFull
 ```
+
+`testFull`, not `test`: under sbt 2 the `test` task carries `testQuick` semantics
+and runs only the tests affected by changes since the last successful run. With
+nothing to do it prints `No tests to run for Test / testQuick`, reports
+`Passed: Total 0`, and exits 0 — success and "ran nothing" look identical. Reach
+for `testFull` whenever you want certainty, and always in CI.
 
 The `InProcessBroadcastBusSpec` exercises subscribe-after, topic isolation, multi-
 subscriber fan-out, and the post-subscription delivery semantic. `TurboStreamSpec`
