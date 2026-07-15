@@ -22,7 +22,11 @@ class PostsRoutesSpec extends FunSuite:
   given system: ActorSystem[Nothing] =
     ActorSystem(Behaviors.empty, "PostsRoutesSpec")
 
-  override def afterAll(): Unit = system.terminate()
+  // Await termination: typed `terminate()` returns Unit, so without this the suite
+  // outlives the system and its threads die on NoClassDefFoundError at teardown.
+  override def afterAll(): Unit =
+    system.terminate()
+    Await.result(system.whenTerminated, 30.seconds)
 
   // 25 items, 10 per page → 3 pages (10, 10, 5).
   private def newHandler(): HttpRequest => scala.concurrent.Future[HttpResponse] =

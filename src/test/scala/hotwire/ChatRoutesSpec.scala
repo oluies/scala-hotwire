@@ -19,7 +19,11 @@ class ChatRoutesSpec extends FunSuite:
   given system: ActorSystem[Nothing] =
     ActorSystem(Behaviors.empty, "ChatRoutesSpec")
 
-  override def afterAll(): Unit = system.terminate()
+  // Await termination: typed `terminate()` returns Unit, so without this the suite
+  // outlives the system and its threads die on NoClassDefFoundError at teardown.
+  override def afterAll(): Unit =
+    system.terminate()
+    Await.result(system.whenTerminated, 30.seconds)
 
   private def newHandler(): HttpRequest => scala.concurrent.Future[HttpResponse] =
     val bus = new InProcessBroadcastBus()

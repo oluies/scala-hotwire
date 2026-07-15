@@ -7,6 +7,7 @@ import org.apache.pekko.stream.testkit.TestSubscriber
 import org.apache.pekko.stream.testkit.scaladsl.TestSink
 
 import java.util.UUID
+import scala.concurrent.Await
 import scala.concurrent.duration.*
 
 class InProcessBroadcastBusSpec extends FunSuite:
@@ -14,8 +15,14 @@ class InProcessBroadcastBusSpec extends FunSuite:
   given system: ActorSystem[Nothing] =
     ActorSystem(Behaviors.empty, "InProcessBroadcastBusSpec")
 
+  /** Wait for the system to actually stop. On a typed ActorSystem `terminate()`
+    * returns Unit, not a Future, so it is easy to fire-and-forget: the suite then
+    * finishes while dispatcher threads and Pekko's shutdown hook are still live,
+    * and they die on NoClassDefFoundError once the test classloader goes away.
+    */
   override def afterAll(): Unit =
     system.terminate()
+    Await.result(system.whenTerminated, 30.seconds)
 
   /** Materialise a subscriber and synchronise with the BroadcastHub by publishing a
     * unique sentinel until it round-trips. After this returns, subsequent publishes
