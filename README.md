@@ -218,6 +218,28 @@ Then start the app pointed at it:
 NATS_URL=nats://localhost:4222 sbt run
 ```
 
+#### Or run the broker in a container
+
+`scripts/dev-nats.sh` does the same thing with [Apple's `container`](https://github.com/apple/container)
+runtime, so you don't install a broker on the host. Only the broker is
+containerised — the app still runs via `sbt run`. JetStream is enabled, which
+the [replay demo](#advanced-example-jetstream-with-reconnect-replay) needs.
+
+```bash
+./scripts/dev-nats.sh up       # start broker (idempotent)
+./scripts/dev-nats.sh status   # is it up, and is JetStream on?
+./scripts/dev-nats.sh run      # up, then `sbt run` wired to it
+./scripts/dev-nats.sh down     # stop and remove
+```
+
+`container` publishes the port to the host, so the broker lands on
+`nats://localhost:4222` — the same URL as the `brew` route, and every command
+above works unchanged. Don't reach for the container's own IP (`container ls`
+shows one): it isn't routable from the host and it changes on every restart.
+
+The container is named `nats-hotwire`, so it shows up under that name in
+[Davit](https://github.com/wouterdebie/davit) if you drive `container` from a GUI.
+
 To prove fan-out across nodes, run two app instances on different ports:
 
 ```bash
