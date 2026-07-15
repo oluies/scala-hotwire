@@ -218,6 +218,37 @@ Then start the app pointed at it:
 NATS_URL=nats://localhost:4222 sbt run
 ```
 
+#### Or run the broker in a container
+
+`scripts/dev-nats.scala` does the same thing with [Apple's `container`](https://github.com/apple/container)
+runtime, so you don't install a broker on the host. Only the broker is
+containerised — the app still runs via `sbt run`. JetStream is enabled, which
+the [replay demo](#advanced-example-jetstream-with-reconnect-replay) needs.
+
+It's a [Mill script](https://mill-build.org/mill/scalalib/script.html) — a single
+`.scala` file, no build definition — so needs `mill` on your PATH (`brew install mill`):
+
+```bash
+mill scripts/dev-nats.scala up       # start broker (idempotent)
+mill scripts/dev-nats.scala status   # is it up, and is JetStream on?
+mill scripts/dev-nats.scala run      # up, then `sbt run` wired to it
+mill scripts/dev-nats.scala down     # stop and remove
+```
+
+For the two-node fan-out demo, `run` takes a port:
+
+```bash
+mill scripts/dev-nats.scala run --port 8081
+```
+
+`container` publishes the port to the host, so the broker lands on
+`nats://localhost:4222` — the same URL as the `brew` route, and every command
+above works unchanged. Don't reach for the container's own IP (`container ls`
+shows one): it isn't routable from the host and it changes on every restart.
+
+The container is named `nats-hotwire`, so it shows up under that name in
+[Davit](https://github.com/wouterdebie/davit) if you drive `container` from a GUI.
+
 To prove fan-out across nodes, run two app instances on different ports:
 
 ```bash
