@@ -46,7 +46,7 @@ body:
     id: scala-version
     attributes:
       label: Scala version
-      placeholder: "3.3.4"
+      placeholder: "3.8.4"
     validations:
       required: true
 
