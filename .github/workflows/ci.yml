@@ -46,4 +46,6 @@ jobs:
         run: sbt -batch -no-colors "Test / compile"
 
       - name: Test
-        run: sbt -batch -no-colors test
+        # testFull, not test: under sbt 2 `test` has testQuick semantics and
+        # exits 0 without running anything when caches are warm.
+        run: sbt -batch -no-colors testFull
