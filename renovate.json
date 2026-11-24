@@ -1,0 +1,29 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  "description": [
+    "Replaces .github/dependabot.yml. That file carried a note worth keeping:",
+    "Dependabot has no sbt support, so the sbt build is maintained by Scala",
+    "Steward instead (PR #36 'Dependency updates' comes from it, not from here).",
+    "",
+    "Renovate DOES understand sbt, so it could take that over as well. It is",
+    "deliberately not enabled: Scala Steward is already working on this repo and",
+    "running both against build.sbt would duplicate every PR -- the same clash",
+    "this migration exists to end. If Steward is ever retired, drop the",
+    "enabledManagers line below and Renovate will pick up build.sbt."
+  ],
+  "enabledManagers": ["github-actions"],
+  "schedule": ["before 8am on monday"],
+  "timezone": "Europe/Stockholm",
+  "prConcurrentLimit": 5,
+  "labels": ["dependencies"],
+  "packageRules": [
+    {
+      "description": "Was the github-actions 'actions' group (patterns: *), weekly on monday at 07:00 Europe/Stockholm, limit 5, 'ci' commit prefix, labels dependencies + github-actions. Its comment read: 'Bundle related action bumps into a single PR - less PR noise, one CI run.'",
+      "matchManagers": ["github-actions"],
+      "groupName": "actions",
+      "semanticCommitType": "ci",
+      "addLabels": ["github-actions"]
+    }
+  ]
+}
