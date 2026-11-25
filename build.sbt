@@ -5,7 +5,7 @@ ThisBuild / version      := "0.1.0-SNAPSHOT"
 val pekkoV     = "1.7.1"
 val pekkoHttpV = "1.4.2"
 val jnatsV     = "2.26.4"
-val munitV     = "1.3.4"
+val munitV     = "1.3.6"
 
 lazy val root = (project in file("."))
   .enablePlugins(SbtTwirl)
