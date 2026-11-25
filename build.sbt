@@ -4,7 +4,7 @@ ThisBuild / version      := "0.1.0-SNAPSHOT"
 
 val pekkoV     = "1.6.0"
 val pekkoHttpV = "1.3.0"
-val jnatsV     = "2.26.0"
+val jnatsV     = "2.26.4"
 val munitV     = "1.3.4"
 
 lazy val root = (project in file("."))
