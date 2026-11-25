@@ -3,7 +3,7 @@ ThisBuild / organization := "se.olund.hotwire"
 ThisBuild / version      := "0.1.0-SNAPSHOT"
 
 val pekkoV     = "1.7.1"
-val pekkoHttpV = "1.3.0"
+val pekkoHttpV = "1.4.2"
 val jnatsV     = "2.26.4"
 val munitV     = "1.3.4"
 
