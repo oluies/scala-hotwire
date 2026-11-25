@@ -1,4 +1,4 @@
-//| scalaVersion: 3.8.4
+//| scalaVersion: 3.10.1
 //| mvnDeps: []
 
 // Run the NATS broker this project's NATS/JetStream demos need, in a container,

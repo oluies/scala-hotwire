@@ -1,11 +1,11 @@
-ThisBuild / scalaVersion := "3.8.4"
+ThisBuild / scalaVersion := "3.10.1"
 ThisBuild / organization := "se.olund.hotwire"
 ThisBuild / version      := "0.1.0-SNAPSHOT"
 
-val pekkoV     = "1.6.0"
-val pekkoHttpV = "1.3.0"
-val jnatsV     = "2.26.0"
-val munitV     = "1.3.4"
+val pekkoV     = "1.7.1"
+val pekkoHttpV = "1.4.2"
+val jnatsV     = "2.26.4"
+val munitV     = "1.3.6"
 
 lazy val root = (project in file("."))
   .enablePlugins(SbtTwirl)
@@ -29,7 +29,7 @@ lazy val root = (project in file("."))
       "org.apache.pekko" %% "pekko-actor-typed"    % pekkoV,
       "org.apache.pekko" %% "pekko-slf4j"          % pekkoV,
       "io.nats"           % "jnats"                % jnatsV,
-      "ch.qos.logback"    % "logback-classic"      % "1.5.38",
+      "ch.qos.logback"    % "logback-classic"      % "1.6.8",
 
       "org.scalameta"    %% "munit"                % munitV     % Test,
       "org.apache.pekko" %% "pekko-http-testkit"   % pekkoHttpV % Test,
