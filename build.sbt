@@ -29,7 +29,7 @@ lazy val root = (project in file("."))
       "org.apache.pekko" %% "pekko-actor-typed"    % pekkoV,
       "org.apache.pekko" %% "pekko-slf4j"          % pekkoV,
       "io.nats"           % "jnats"                % jnatsV,
-      "ch.qos.logback"    % "logback-classic"      % "1.5.38",
+      "ch.qos.logback"    % "logback-classic"      % "1.6.8",
 
       "org.scalameta"    %% "munit"                % munitV     % Test,
       "org.apache.pekko" %% "pekko-http-testkit"   % pekkoHttpV % Test,
